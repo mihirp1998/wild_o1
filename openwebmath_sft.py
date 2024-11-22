@@ -32,6 +32,7 @@ parser.add_argument("--packing", action="store_true", help="Enable data packing"
 parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model name")
 parser.add_argument("--output_dir", type=str, default=f"{DATA_DIR}/hendrycks-sft-openwebmath", help="Directory to save model outputs")
 parser.add_argument("--push_to_hub", action="store_true", help="Push the model to Hugging Face Hub after training")
+parser.add_argument("--rand_train", action="store_true", help="Use random samples for training")
 parser.add_argument("--exp_id", type=str, default='0000', help="Experiment ID")
 parser.add_argument("--use_n_shot_prompt", type=int, default=0, help="Whether to use n-shot prompt")
 parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tokens to generate")
@@ -40,6 +41,7 @@ parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eva
 parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
 
 # PEFT arguments
+parser.add_argument("--use_incontext", action="store_true", help="incontext")
 parser.add_argument("--use_peft", action="store_true", help="Enable PEFT")
 parser.add_argument("--lora_r", type=int, default=32, help="PEFT LoRA rank")
 parser.add_argument("--lora_alpha", type=int, default=16, help="PEFT LoRA alpha")
@@ -53,7 +55,7 @@ def remove_boxed(s):
     except:
         return None
 
-def convert_item(item):
+def convert_item(item, rand_item=None):
     messages = []
     prefix = item.get('prefix', '')
     model_output = item.get('model_output', '')
@@ -61,7 +63,12 @@ def convert_item(item):
     suffix = item.get('suffix', '')
 
     messages.append({'content': prefix, 'role': 'user'})
-    messages.append({'content': model_output + sentence, 'role': 'assistant'})
+    
+    if rand_item is not None:
+        rand_model_output = rand_item.get('model_output', '')
+        messages.append({'content': rand_model_output + sentence, 'role': 'assistant'})
+    else:
+        messages.append({'content': model_output + sentence, 'role': 'assistant'})
 
     num_turns = len(messages)
 
@@ -71,6 +78,27 @@ def convert_item(item):
         'num_turns': num_turns,
         'sentence': sentence,
         'suffix': suffix
+    }
+    return new_item
+
+
+def convert_item_incontext(item, rand_item=None):
+    messages = []
+    text = item.get('text', '')
+    model_output_sentence = item.get('model_output_sentence', '')
+    model_output_cot = item.get('model_output_cot', '')
+    text_index = text.find(model_output_sentence[1:-1])
+    prefix = text[:text_index]
+    suffix = model_output_cot + text[text_index:]
+
+    messages.append({'content': prefix, 'role': 'user'})
+    messages.append({'content': suffix, 'role': 'assistant'})
+
+    num_turns = len(messages)
+
+    new_item = {
+        'source': 'GPT4LLM',
+        'messages': messages,
     }
     return new_item
 
@@ -148,7 +176,7 @@ class HendrycksMathGenerateSamplesCallback(TrainerCallback):
             optimizer = kwargs.get('optimizer')
             scheduler = kwargs.get('lr_scheduler')
             tokenizer = self.tokenizer
-            if state.global_step % self.generate_every_n_steps == 0 and state.global_step != 0:
+            if state.global_step % self.generate_every_n_steps == 0:
                 if optimizer and scheduler:
                     optimizer_state = optimizer.state_dict()
                     scheduler_state = scheduler.state_dict()
@@ -238,7 +266,7 @@ class GenerateSamplesCallback(TrainerCallback):
             optimizer = kwargs.get('optimizer')
             scheduler = kwargs.get('lr_scheduler')
             tokenizer = self.tokenizer
-            if state.global_step % self.generate_every_n_steps == 0 and state.global_step != 0:
+            if state.global_step % self.generate_every_n_steps == 0:
                 
                 if optimizer and scheduler:
                     optimizer_state = optimizer.state_dict()
@@ -296,7 +324,6 @@ class GenerateSamplesCallback(TrainerCallback):
                     else:
                         new_train_perplexities.append(new_perplexity)
 
-
                 # Log generated samples and accuracies to wandb
                 table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence", "suffix"])
                 for data in self.accumulated_data:
@@ -330,16 +357,33 @@ def get_peft_config(args):
 if __name__ == "__main__":
     # Parse arguments
     args = parser.parse_args()
+    print(args)
 
     # Initialize wandb
     wandb.init(project="openwebmath-sft", group=args.exp_id)
 
     # Load training data
-    with open(f"{DATA_DIR}/filtered_openwebmath/sft_train/chunk_0.json", 'r') as f:
-        all_train_data = json.load(f)
+    if args.use_incontext:
+        all_train_data = []
+        train_dir = "/home/mprabhud/datasets/o1/filtered_openwebmath/incontext_sft_train"
+        for filename in os.listdir(train_dir):
+            if filename.endswith('.json'):
+                with open(os.path.join(train_dir, filename), 'r') as f:
+                    data = json.load(f)
+                    all_train_data.extend(data)
+    else:
+        with open(f"{DATA_DIR}/filtered_openwebmath/sft_train/chunk_0.json", 'r') as f:
+            all_train_data = json.load(f)
     # print(len(all_train_data))
-
-    train_data_transformed = [convert_item(item) for item in all_train_data]
+    if args.use_incontext:
+        train_data_transformed = [convert_item_incontext(item) for i, item in enumerate(all_train_data)]
+        # st()
+    else:
+        if args.rand_train:
+            train_data_transformed = [convert_item(item, rand_item=all_train_data[np.random.randint(len(all_train_data))]) for i, item in enumerate(all_train_data)]
+        else:
+            train_data_transformed = [convert_item(item) for item in all_train_data]
+    # st()
     train_dataset = Dataset.from_list(train_data_transformed)
 
     # Load test data
@@ -371,8 +415,11 @@ if __name__ == "__main__":
         output_dir=output_dir,
         push_to_hub=args.push_to_hub,
         packing=args.packing,
-        save_strategy='steps',
-        save_steps=args.save_steps,
+        do_eval=True,
+        evaluation_strategy="steps",
+        eval_steps=50,                
+        # save_strategy='steps',
+        # save_steps=args.save_steps,
         bf16=True
     )
     
@@ -417,8 +464,12 @@ if __name__ == "__main__":
         eval_dataset=test_dataset,
         peft_config=get_peft_config(args),
         args=training_args,
-        callbacks=[hendrycks_math_callback, callback],
+        callbacks=[hendrycks_math_callback],
     )
+    
+    # Calculate number of trainable parameters
+    num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {num_trainable_params:,}")
     # st()
 
     # Train model
