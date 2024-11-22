@@ -21,7 +21,8 @@ parser.add_argument("--mode", type=str, default='train')
 # Parse arguments
 args = parser.parse_args()
 
-model_name = "meta-llama/Llama-3.2-3B-Instruct"
+# model_name = "meta-llama/Llama-3.2-3B-Instruct"
+model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
 device = "cuda" if torch.cuda.is_available() else "cpu"
