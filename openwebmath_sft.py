@@ -112,6 +112,16 @@ def get_log_probs(tokens):
             
     return token_log_probs
 
+def get_val_loss(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
+    if tokenized_model_output is not None:
+        tokenized_sentence = torch.cat((tokenized_model_output, tokenized_sentence), dim=0).to('cuda')
+    prefix_length = tokenized_prefix.shape[0]
+    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to('cuda')
+    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0))
+    sentence_log_probs = token_log_probs[prefix_length-1:combined_tokens.shape[0]-1]
+    avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
+    return avg_log_prob
+
 def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
     if tokenized_model_output is not None:
         tokenized_prefix = torch.cat((tokenized_prefix, tokenized_model_output), dim=0).to('cuda')
@@ -250,8 +260,8 @@ class GenerateSamplesCallback(TrainerCallback):
                 sample_indices = np.arange(0, self.num_samples * 10, 10)
                 samples = concatenate_datasets([self.train_dataset.select(sample_indices), self.test_dataset.select(sample_indices)])
 
-                old_perplexities = []
-                new_perplexities = []
+                new_test_perplexities = []
+                new_train_perplexities = []
                 num_reduced_train_perplexities = 0
                 num_reduced_test_perplexities = 0
 
@@ -281,14 +291,10 @@ class GenerateSamplesCallback(TrainerCallback):
                     tokenized_model_output = tokenizer(generated_text, return_tensors="pt").to('cuda')['input_ids'][0]
                     original_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=None)
                     new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=tokenized_model_output)
-                    old_perplexities.append(original_perplexity)
-                    new_perplexities.append(new_perplexity)
-
-                    if new_perplexity < original_perplexity:
-                        if idx < len(sample_indices):
-                            num_reduced_train_perplexities += 1
-                        else:
-                            num_reduced_test_perplexities += 1
+                    if idx >= self.num_samples:
+                        new_test_perplexities.append(new_perplexity)
+                    else:
+                        new_train_perplexities.append(new_perplexity)
 
 
                 # Log generated samples and accuracies to wandb
@@ -305,10 +311,8 @@ class GenerateSamplesCallback(TrainerCallback):
                 wandb.log({
                     'Generated Samples': table,
                     'global_step': state.global_step,
-                    'old_perplexity': sum(old_perplexities) / len(old_perplexities),
-                    'new_perplexity': sum(new_perplexities) / len(new_perplexities),
-                    'num_reduced_train_perplexities': num_reduced_train_perplexities,
-                    'num_reduced_test_perplexities': num_reduced_test_perplexities
+                    'new_test_perplexity': sum(new_test_perplexities) / len(new_test_perplexities),
+                    'new_train_perplexity': sum(new_train_perplexities) / len(new_train_perplexities),
                 })
                 model.train()
                 if optimizer and scheduler:
@@ -367,7 +371,8 @@ if __name__ == "__main__":
         output_dir=output_dir,
         push_to_hub=args.push_to_hub,
         packing=args.packing,
-        save_strategy='no',
+        save_strategy='steps',
+        save_steps=args.save_steps,
         bf16=True
     )
     
@@ -409,6 +414,7 @@ if __name__ == "__main__":
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         peft_config=get_peft_config(args),
         args=training_args,
         callbacks=[hendrycks_math_callback, callback],

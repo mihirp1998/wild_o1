@@ -6,6 +6,52 @@ import math
 import matplotlib.pyplot as plt
 import os
 
+import matplotlib.pyplot as plt
+from IPython.core.display import display, HTML
+
+def highlight_text(words, values, output_file=None, append=False):
+    """
+    Highlights words with different opacities based on the values provided.
+    
+    Args:
+        words (list): List of words to be highlighted.
+        values (list): List of numerical values corresponding to the words. 
+                       The values determine the opacity of the highlight (0 to 1).
+        output_file (str): If provided, saves the output HTML to this file.
+        append (bool): If True, appends to existing file instead of overwriting.
+    """
+    # Normalize the values to be between 0 and 1
+    min_val = min(values)
+    max_val = max(values)
+    normalized_values = [(v - min_val) / (max_val - min_val) for v in values]
+    
+    # Create the HTML string for this example
+    html_content = "<div style='margin-bottom: 20px; padding: 10px; border: 1px solid #ccc;'>"
+    for word, opacity in zip(words, normalized_values):
+        color = f"rgba(255, 0, 0, {opacity})"  # Highlight with varying red opacity
+        html_content += f'<span style="background-color: {color}; padding: 2px; margin: 2px;">{word}</span> '
+    html_content += "</div>"
+    
+    # Display in Jupyter Notebook
+    display(HTML(html_content))
+    
+    # Save to HTML file if output_file is provided
+    if output_file:
+        if append and os.path.exists(output_file):
+            with open(output_file, "r") as file:
+                existing_content = file.read()
+                # Insert new content before the closing tags
+                if "</body></html>" in existing_content:
+                    existing_content = existing_content.replace("</body></html>", f"{html_content}</body></html>")
+                else:
+                    existing_content += html_content
+            with open(output_file, "w") as file:
+                file.write(existing_content)
+        else:
+            with open(output_file, "w") as file:
+                file.write(f"<html><head><style>body {{ font-family: Arial, sans-serif; padding: 20px; }}</style></head><body>{html_content}</body></html>")
+
+
 model_name = "meta-llama/Llama-3.2-3B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -57,7 +103,8 @@ def call_model(prompt):
             sentence = ''.join(current_sentence).strip()
             if sentence:  # Only add non-empty sentences
                 # Convert log prob to perplexity
-                sentence_perplexity = math.exp(-current_sentence_log_prob / len(current_sentence))
+                # sentence_perplexity = math.exp(-current_sentence_log_prob / len(current_sentence))
+                sentence_perplexity = -current_sentence_log_prob / len(current_sentence)
                 sentence_perplexity_pairs.append((sentence, sentence_perplexity))
             current_sentence = []
             current_sentence_log_prob = 0.0
@@ -74,6 +121,14 @@ def call_model(prompt):
 train_ds = load_from_disk(f"/grogu/user/lilic/filtered_openwebmath/train/chunk_0")
 
 # Iterate through dataset (mocked here)
+os.makedirs("perplexity_analysis", exist_ok=True)
+output_file = "perplexity_analysis/highlighted_text.html"
+
+# Start with a fresh file
+if os.path.exists(output_file):
+    os.remove(output_file)
+
+# Iterate through dataset (mocked here)
 for i, item in enumerate(train_ds):
     if i >= 10:
         break
@@ -83,48 +138,10 @@ for i, item in enumerate(train_ds):
 
     # Create directory if it doesn't exist
     os.makedirs("perplexity_analysis", exist_ok=True)
+     # Example usage
+    sentences = [pair[0] for pair in sentence_perplexity_pairs]
+    values = [pair[1] for pair in sentence_perplexity_pairs]
 
-    # Break sentence-perplexity pairs into chunks of 40
-    chunk_size = 40
-    chunks = [sentence_perplexity_pairs[i:i + chunk_size] for i in range(0, len(sentence_perplexity_pairs), chunk_size)]
-
-    # Set up the subplots
-    num_chunks = len(chunks)
-    fig, axes = plt.subplots(num_chunks, 1, figsize=(12, 20 * num_chunks))  # Reduced height per subplot
-
-    # Ensure axes is always iterable (handles single subplot case)
-    if num_chunks == 1:
-        axes = [axes]
-
-    for idx, (chunk, ax) in enumerate(zip(chunks, axes)):
-        sentences = [pair[0] for pair in chunk]
-        perplexities = [pair[1] for pair in chunk]
-
-        bars = ax.bar(range(len(sentences)), perplexities)
-
-        # Customize each subplot
-        ax.set_title(f"Sentence Perplexities for Sentences {idx * chunk_size + 1}-{(idx + 1) * chunk_size}")
-        ax.set_xlabel("Sentences")
-        ax.set_ylabel("Perplexity")
-        ax.set_xticks(range(len(sentences)))
-        # Escape special characters in labels
-        escaped_sentences = [s.replace('$', '\$') for s in sentences]
-        ax.set_xticklabels(escaped_sentences, rotation=60, ha="right")  # Increased rotation to 60 degrees
-
-        # Add value labels on top of each bar
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2.0, height, f"{height:.2f}", ha="center", va="bottom")
-
-        # Adjust the position of the axes to make the plot area smaller and x-axis label area larger
-        pos = ax.get_position()
-        new_height = pos.height * 0.4  # Reduced plot height to 40% of original
-        new_pos = [pos.x0, pos.y0 + (pos.height - new_height), pos.width, new_height]
-        ax.set_position(new_pos)
-
-    # Adjust layout with more bottom space
-    plt.subplots_adjust(bottom=0.5, hspace=0.7)  # Increased bottom margin to 50% and adjusted hspace
-
-    # Save the plot
-    plt.savefig(f"perplexity_analysis/stacked_perplexities_{i}.png")
-    plt.close()
+    # Append each example to the same file
+    highlight_text(sentences, values, output_file=output_file, append=i > 0)
+    print(f"Processed example {i+1}/10")
