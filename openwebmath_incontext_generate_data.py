@@ -98,16 +98,23 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
         if not os.path.exists(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}"):
             os.makedirs(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}")
 
+
+    num_total_generations = 0
+    num_added_generations = 0
+
     for i, item in enumerate(train_ds):
         if i < args.element_start or i >= args.element_end:
             continue
         print(f"Processing element {i}, total time has been {time.time() - start_time} seconds")
+        print(f'Num total generations: {num_total_generations}, Num added generations: {num_added_generations}')
 
         metadata = json.loads(item["metadata"])
         math_score = metadata["extraction_info"]["math_score"]
 
         lst_text_in_sentences, num_sentences = get_text_in_sentences(item["text"])
         text_in_sentences = " ".join(lst_text_in_sentences)
+
+        if len(item["text"]) > 2000: continue
 
         with torch.no_grad():
 
@@ -160,7 +167,10 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
                 new_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output)
                 print(f"Old perplexity: {old_perplexity}, New perplexity: {new_perplexity}")
 
+                num_total_generations += 1
+
                 if new_perplexity < old_perplexity:
+                    num_added_generations += 1
                     print('Adding to dataset')
 
                     new_item = {
