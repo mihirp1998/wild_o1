@@ -90,11 +90,11 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
     start_time = time.time()
     
     if not args.use_wikipedia:
-        train_ds = load_from_disk(f"/grogu/user/lilic/filtered_openwebmath/train/chunk_{chunk_num}")
+        train_ds = load_from_disk(f"/grogu/user/lilic/filtered_openwebmath/{mode}/chunk_{chunk_num}")
         if not os.path.exists(f"/grogu/user/lilic/filtered_openwebmath/incontextv2_sft_{mode}"):
             os.makedirs(f"/grogu/user/lilic/filtered_openwebmath/incontext_sftv2_{mode}")
     else:
-        train_ds = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/train/chunk_{chunk_num}")
+        train_ds = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/{mode}/chunk_{chunk_num}")
         if not os.path.exists(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}"):
             os.makedirs(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}")
 

@@ -84,23 +84,43 @@ def convert_item(item, rand_item=None):
 
 def convert_item_incontext(item, rand_item=None):
     messages = []
-    text = item.get('text', '')
-    model_output_sentence = item.get('model_output_sentence', '')
-    model_output_cot = item.get('model_output_cot', '')
-    text_index = text.find(model_output_sentence[1:-1])
-    prefix = text[:text_index]
-    suffix = model_output_cot + text[text_index:]
+    
+    prefix = item.get('prefix', '')
+    sentence = item.get('sentence', '')
+    model_output = item.get('model_output', '')
 
     messages.append({'content': prefix, 'role': 'user'})
-    messages.append({'content': suffix, 'role': 'assistant'})
+    messages.append({'content': model_output + sentence, 'role': 'assistant'})
 
     num_turns = len(messages)
 
     new_item = {
         'source': 'GPT4LLM',
         'messages': messages,
+        'model_output': model_output,
+        'sentence': sentence
     }
     return new_item
+
+# def convert_item_incontext(item, rand_item=None):
+#     messages = []
+#     text = item.get('text', '')
+#     model_output_sentence = item.get('model_output_sentence', '')
+#     model_output_cot = item.get('model_output_cot', '')
+#     text_index = text.find(model_output_sentence[1:-1])
+#     prefix = text[:text_index]
+#     suffix = model_output_cot + text[text_index:]
+
+#     messages.append({'content': prefix, 'role': 'user'})
+#     messages.append({'content': suffix, 'role': 'assistant'})
+
+#     num_turns = len(messages)
+
+#     new_item = {
+#         'source': 'GPT4LLM',
+#         'messages': messages,
+#     }
+#     return new_item
 
 def convert_item_hendrycks_math(item):
     messages = []
@@ -290,8 +310,6 @@ class GenerateSamplesCallback(TrainerCallback):
 
                 new_test_perplexities = []
                 new_train_perplexities = []
-                num_reduced_train_perplexities = 0
-                num_reduced_test_perplexities = 0
 
                 for idx, sample in enumerate(samples):
                     input_text = []
@@ -310,8 +328,8 @@ class GenerateSamplesCallback(TrainerCallback):
                         "input_text": input_text[0]['content'],
                         "assistant": assistant_text,
                         "generated_output": generated_text,
-                        "sentence": sample['sentence'],
-                        "suffix": sample['suffix']
+                        "model_output": sample['model_output'],
+                        "sentence": sample['sentence']
                     })
 
                     tokenized_input = tokenizer(input_text[0]['content'], return_tensors="pt").to('cuda')['input_ids'][0]
@@ -325,7 +343,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         new_train_perplexities.append(new_perplexity)
 
                 # Log generated samples and accuracies to wandb
-                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence", "suffix"])
+                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence"])
                 for data in self.accumulated_data:
                     table.add_data(
                         data["global_step"],
@@ -333,7 +351,6 @@ class GenerateSamplesCallback(TrainerCallback):
                         data["assistant"],
                         data["generated_output"],
                         data["sentence"],
-                        data["suffix"]
                     )
                 wandb.log({
                     'Generated Samples': table,
@@ -350,8 +367,12 @@ class GenerateSamplesCallback(TrainerCallback):
 # Define PEFT config if enabled
 def get_peft_config(args):
     if args.use_peft:
-        from trl import LoraConfig
-        return LoraConfig(r=args.lora_r, alpha=args.lora_alpha)
+        from peft import LoraConfig
+        peft_config = LoraConfig(
+            r=args.lora_r, 
+            lora_alpha=args.lora_alpha
+        )
+        return peft_config
     return None
 
 if __name__ == "__main__":
@@ -360,21 +381,23 @@ if __name__ == "__main__":
     print(args)
 
     # Initialize wandb
-    wandb.init(project="openwebmath-sft", group=args.exp_id)
+    wandb.init(project="openwebmath-sft2", group=args.exp_id)
 
     # Load training data
     if args.use_incontext:
         all_train_data = []
-        train_dir = "/home/mprabhud/datasets/o1/filtered_openwebmath/incontext_sft_train"
+        # train_dir = "/home/mprabhud/datasets/o1/filtered_openwebmath/incontext_sft_train"
+        train_dir = "/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_train"
         for filename in os.listdir(train_dir):
             if filename.endswith('.json'):
                 with open(os.path.join(train_dir, filename), 'r') as f:
                     data = json.load(f)
                     all_train_data.extend(data)
     else:
-        with open(f"{DATA_DIR}/filtered_openwebmath/sft_train/chunk_0.json", 'r') as f:
+        with open(f"{DATA_DIR}/wikipedia_openwebmath/sft_train/chunk_0.json", 'r') as f:
             all_train_data = json.load(f)
-    # print(len(all_train_data))
+    print(len(all_train_data))
+
     if args.use_incontext:
         train_data_transformed = [convert_item_incontext(item) for i, item in enumerate(all_train_data)]
         # st()
@@ -387,9 +410,10 @@ if __name__ == "__main__":
     train_dataset = Dataset.from_list(train_data_transformed)
 
     # Load test data
-    with open(f"{DATA_DIR}/filtered_openwebmath/sft_test/chunk_0.json", 'r') as f:
+    # with open(f"{DATA_DIR}/filtered_openwebmath/sft_test/chunk_0.json", 'r') as f:
+    with open("/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_test/chunk_0_elements_0_10000.json", 'r') as f:
         all_test_data = json.load(f)
-    # print(len(all_test_data))
+    print(len(all_test_data))
 
     test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
@@ -417,7 +441,8 @@ if __name__ == "__main__":
         packing=args.packing,
         do_eval=True,
         evaluation_strategy="steps",
-        eval_steps=50,                
+        eval_steps=100,   
+        save_strategy='no',             
         # save_strategy='steps',
         # save_steps=args.save_steps,
         bf16=True
@@ -426,7 +451,8 @@ if __name__ == "__main__":
     start_time = time.time()
     
     # Load Hendrycks Math test data
-    test_directory = f"{DATA_DIR}/MATH/MATH/test/prealgebra"
+    # test_directory = f"{DATA_DIR}/MATH/MATH/test/prealgebra"
+    test_directory = "/grogu/user/lilic/MATH/MATH/test/prealgebra"
     test_data = []
     for filename in os.listdir(test_directory):
         if filename.endswith(".json"):
@@ -461,10 +487,10 @@ if __name__ == "__main__":
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
-        eval_dataset=test_dataset,
+        eval_dataset=Dataset.from_list(test_data_transformed[:100]),
         peft_config=get_peft_config(args),
         args=training_args,
-        callbacks=[hendrycks_math_callback],
+        callbacks=[callback, hendrycks_math_callback],
     )
     
     # Calculate number of trainable parameters
