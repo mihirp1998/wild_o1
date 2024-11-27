@@ -89,7 +89,8 @@ def convert_item_incontext(item, rand_item=None):
     sentence = item.get('sentence', '')
     model_output = item.get('model_output', '')
 
-    messages.append({'content': prefix, 'role': 'user'})
+    # messages.append({'content': prefix, 'role': 'user'})
+    messages.append({'content': f'Please complete the following text (in less than 200 tokens): {prefix}', 'role': 'user'})
     messages.append({'content': model_output + sentence, 'role': 'assistant'})
 
     num_turns = len(messages)
@@ -415,7 +416,10 @@ if __name__ == "__main__":
         all_test_data = json.load(f)
     print(len(all_test_data))
 
-    test_data_transformed = [convert_item(item) for item in all_test_data]
+    if args.use_incontext:
+        test_data_transformed = [convert_item_incontext(item) for item in all_test_data]
+    else:
+        test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
 
     # Load tokenizer and model
