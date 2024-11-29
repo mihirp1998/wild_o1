@@ -3,7 +3,7 @@ from trl import SFTConfig, SFTTrainer
 import time
 import ipdb
 st = ipdb.set_trace
-from datasets import load_dataset, Dataset, concatenate_datasets
+from datasets import load_dataset, Dataset, concatenate_datasets, load_from_disk
 import wandb
 import json
 import numpy as np
@@ -14,6 +14,7 @@ import torch
 import math
 import os 
 from util import clean_numbers, last_boxed_only, last_boxed_only_string
+import re
 
 DATA_DIR = os.environ['DATA_DIR']
 
@@ -39,6 +40,7 @@ parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tok
 parser.add_argument("--num_samples", type=int, default=20, help="Samples for evaluation")
 parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eval freq")
 parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
+parser.add_argument("--prompt_version", type=int, default=1, help="Weight decay")
 
 # PEFT arguments
 parser.add_argument("--use_incontext", action="store_true", help="incontext")
@@ -89,8 +91,16 @@ def convert_item_incontext(item, rand_item=None):
     sentence = item.get('sentence', '')
     model_output = item.get('model_output', '')
 
-    # messages.append({'content': prefix, 'role': 'user'})
-    messages.append({'content': f'Please complete the following text (in less than 200 tokens): {prefix}', 'role': 'user'})
+    if args.prompt_version == 1:
+        prompt = prefix
+    elif args.prompt_version == 2:
+        prompt = f'Please complete the following text (in less than 200 tokens): {prefix}'
+    elif args.prompt_version == 3:
+        prompt = f'Please generate one sentence that completes the following text and do not generate any other text: {prefix}'
+    else:
+        raise NotImplementedError
+
+    messages.append({'content': prompt, 'role': 'user'})
     messages.append({'content': model_output + sentence, 'role': 'assistant'})
 
     num_turns = len(messages)
@@ -179,7 +189,8 @@ def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=
     token_log_probs = get_log_probs(combined_tokens.unsqueeze(0))
     sentence_log_probs = token_log_probs[prefix_and_model_output_length-1:combined_tokens.shape[0]-1]
     avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
-    perplexity = math.exp(-avg_log_prob)
+    # perplexity = math.exp(-avg_log_prob)
+    perplexity = -avg_log_prob
     return perplexity
 
 class HendrycksMathGenerateSamplesCallback(TrainerCallback):
@@ -271,6 +282,138 @@ class HendrycksMathGenerateSamplesCallback(TrainerCallback):
                     scheduler.load_state_dict(scheduler_state)
                     scheduler.step = original_scheduler_step
 
+def get_text_in_sentences(text):
+    # Split on period, exclamation mark, question mark, or newline, followed by optional whitespace
+    sentences = re.split(r'[.!?\n]\s*', text)
+    # Filter out empty sentences and strip whitespace
+    sentences = [sentence.strip() for sentence in sentences if sentence]
+    numbered_sentences = [(f"Sentence #{i+1}: {sentence}") for i, sentence in enumerate(sentences)]
+    return numbered_sentences, len(sentences)
+
+class GenerateSamplesPrivilegedCallback(TrainerCallback):
+    def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
+        self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
+        self.generate_every_n_steps = generate_every_n_steps
+        self.num_samples = num_samples
+        self.accumulated_data = []
+        self.max_new_tokens = max_new_tokens
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        with torch.no_grad():
+            model = kwargs['model']
+            optimizer = kwargs.get('optimizer')
+            scheduler = kwargs.get('lr_scheduler')
+            tokenizer = self.tokenizer
+            if state.global_step % self.generate_every_n_steps == 0:
+                
+                if optimizer and scheduler:
+                    optimizer_state = optimizer.state_dict()
+                    scheduler_state = scheduler.state_dict()
+                    original_scheduler_step = scheduler.step
+                model.eval()
+                generator = transformers.pipeline(
+                    "text-generation",
+                    model=model,
+                    tokenizer=tokenizer,
+                    pad_token_id=tokenizer.eos_token_id,
+                    max_new_tokens=3,
+                    device='cuda'
+                )
+
+                generator2 = transformers.pipeline(
+                    "text-generation",
+                    model=model,
+                    tokenizer=tokenizer,
+                    pad_token_id=tokenizer.eos_token_id,
+                    max_new_tokens=200,
+                    device='cuda'
+                )
+
+                sample_indices = np.arange(self.num_samples)
+                samples = self.test_dataset.select(sample_indices)
+
+                new_test_perplexities = []
+
+                for idx, sample in enumerate(samples):
+                    messages = [] 
+                    lst_text_in_sentences, num_sentences = get_text_in_sentences(sample["text"])
+                    text_in_sentences = " ".join(lst_text_in_sentences)
+                    messages.append({"role": "user", "content": f"{text_in_sentences}\nInstruction: Given the above text, please identify the sentence that is most difficult to understand. Please ignore anything that is not relevant, such as metadata. Please respond in the format of Sentence #<number>, where <number> is a number between 0 and {num_sentences}."})
+                    if len(sample["text"]) > 2000: continue
+
+                    generated_text = generator(messages)[0]['generated_text'][-1]['content']
+
+                    index_of_hash = generated_text.find("#")
+                    if index_of_hash == -1:
+                        # print(f"No sentence number found in response: {generated_text}")
+                        # print('------------------')
+                        continue
+                    sentence_num_str = generated_text[index_of_hash+1:].strip()
+                    if not sentence_num_str.isdigit():
+                        # print(f"Invalid sentence number format: {sentence_num_str}")
+                        # print('------------------')
+                        continue
+                    sentence_num = int(sentence_num_str) - 1
+                    if sentence_num < 0 or sentence_num >= num_sentences:
+                        # print(f"Sentence number {sentence_num + 1} out of range (1-{num_sentences})")
+                        # print('------------------')
+                        continue
+
+                    messages.append({"role": "assistant", "content": f"{generated_text}"})
+                    messages.append({"role": "user", "content": f"Please insert an additional sentence before the selected sentence that would make the sentence easier to understand. Please respond with Sentence #{sentence_num}.5: <sentence>. Do not generate any other text."})
+
+                    generated_text = generator2(messages)[0]['generated_text'][-1]['content']
+                    print(idx, generated_text)
+
+                    processed_sentence = lst_text_in_sentences[sentence_num]
+                    idx_of_actual_sentence = processed_sentence.find(":")
+                    sentence = processed_sentence[idx_of_actual_sentence+1:].strip()
+                    location_of_sentence = sample["text"].find(sentence)
+                    prefix = sample["text"][:location_of_sentence]
+
+                    processed_model_output = generated_text
+                    idx_of_actual_model_output = processed_model_output.find(":")
+                    model_output = processed_model_output[idx_of_actual_model_output+1:].strip() + ' '
+
+                    tokenized_prefix = tokenizer(prefix, return_tensors="pt").to('cuda')['input_ids'][0]
+                    tokenized_sentence = tokenizer(sentence, return_tensors="pt").to('cuda')['input_ids'][0]
+                    tokenized_model_output = tokenizer(model_output, return_tensors="pt").to('cuda')['input_ids'][0]
+
+                    new_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output)
+                    # print(new_perplexity)
+
+                    # Log individual samples for inspection
+                    self.accumulated_data.append({
+                        "global_step": state.global_step,
+                        "text": sample['text'],
+                        "prefix": prefix,
+                        "sentence": sentence,
+                        "model_output": model_output
+                    })
+
+                    new_test_perplexities.append(new_perplexity)
+
+                # Log generated samples and accuracies to wandb
+                table = wandb.Table(columns=["global_step", "text", "prefix", "model_output", "sentence"])
+                for data in self.accumulated_data:
+                    table.add_data(
+                        data["global_step"],
+                        data["text"],
+                        data["prefix"],
+                        data["model_output"],
+                        data["sentence"],
+                    )
+                wandb.log({
+                    'Generated Samples Privileged': table,
+                    'new_test_perplexity_privileged': sum(new_test_perplexities) / len(new_test_perplexities) if len(new_test_perplexities) > 0 else 0,
+                    'global_step': state.global_step})
+                model.train()
+                if optimizer and scheduler:
+                    optimizer.load_state_dict(optimizer_state)
+                    scheduler.load_state_dict(scheduler_state)
+                    scheduler.step = original_scheduler_step
+
 class GenerateSamplesCallback(TrainerCallback):
     def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
         self.train_dataset = train_dataset
@@ -335,9 +478,11 @@ class GenerateSamplesCallback(TrainerCallback):
 
                     tokenized_input = tokenizer(input_text[0]['content'], return_tensors="pt").to('cuda')['input_ids'][0]
                     tokenized_sentence = tokenizer(sample['sentence'], return_tensors="pt").to('cuda')['input_ids'][0]
-                    tokenized_model_output = tokenizer(generated_text, return_tensors="pt").to('cuda')['input_ids'][0]
-                    original_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=None)
-                    new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=tokenized_model_output)
+                    if state.global_step == 0:
+                        new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=None)
+                    else:
+                        tokenized_model_output = tokenizer(generated_text, return_tensors="pt").to('cuda')['input_ids'][0]
+                        new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=tokenized_model_output)
                     if idx >= self.num_samples:
                         new_test_perplexities.append(new_perplexity)
                     else:
@@ -382,7 +527,7 @@ if __name__ == "__main__":
     print(args)
 
     # Initialize wandb
-    wandb.init(project="openwebmath-sft2", group=args.exp_id)
+    wandb.init(project="openwebmath-sft4", group=args.exp_id)
 
     # Load training data
     if args.use_incontext:
@@ -422,6 +567,8 @@ if __name__ == "__main__":
         test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
 
+    test_ds_privileged = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/test/chunk_0")
+
     # Load tokenizer and model
     model_name = args.model_name
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -444,8 +591,8 @@ if __name__ == "__main__":
         push_to_hub=args.push_to_hub,
         packing=args.packing,
         do_eval=True,
-        evaluation_strategy="steps",
-        eval_steps=100,   
+        # evaluation_strategy="steps",
+        # eval_steps=100,   
         save_strategy='no',             
         # save_strategy='steps',
         # save_steps=args.save_steps,
@@ -478,6 +625,14 @@ if __name__ == "__main__":
         max_new_tokens=args.max_new_tokens
     )
 
+    privileged_callback = GenerateSamplesPrivilegedCallback(
+        test_dataset=test_ds_privileged,
+        tokenizer=tokenizer,
+        generate_every_n_steps=args.generate_every_n_steps,
+        num_samples=args.num_samples,
+        max_new_tokens=args.max_new_tokens
+    )
+
     hendrycks_math_callback = HendrycksMathGenerateSamplesCallback(
         test_dataset=test_dataset_hendrycks_math,
         tokenizer=tokenizer,
@@ -491,7 +646,6 @@ if __name__ == "__main__":
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
-        eval_dataset=Dataset.from_list(test_data_transformed[:100]),
         peft_config=get_peft_config(args),
         args=training_args,
         callbacks=[callback, hendrycks_math_callback],
