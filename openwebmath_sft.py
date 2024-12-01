@@ -220,7 +220,10 @@ class HendrycksMathGenerateSamplesCallback(TrainerCallback):
                     tokenizer=tokenizer,
                     pad_token_id=tokenizer.eos_token_id,
                     max_new_tokens=self.max_new_tokens,
-                    device='cuda'
+                    device='cuda',
+                    do_sample=False,
+                    num_beams=1,
+                    temperature=1.0
                 )
                 sample_indices = np.arange(self.num_samples)
                 samples = self.test_dataset.select(sample_indices)
@@ -313,45 +316,92 @@ class GenerateSamplesCallback(TrainerCallback):
                     scheduler_state = scheduler.state_dict()
                     original_scheduler_step = scheduler.step
                 model.eval()
-                # generator = transformers.pipeline(
-                #     "text-generation",
-                #     model=model,
-                #     tokenizer=tokenizer,
-                #     pad_token_id=tokenizer.eos_token_id,
-                #     max_new_tokens=self.max_new_tokens,
-                #     device='cuda'
-                # )
+                generator = transformers.pipeline(
+                    "text-generation",
+                    model=model,
+                    tokenizer=tokenizer,
+                    pad_token_id=tokenizer.eos_token_id,
+                    max_new_tokens=self.max_new_tokens,
+                    device='cuda',
+                    do_sample=False,
+                    num_beams=1,
+                    temperature=1.0
+                )
 
-                sample_indices = np.arange(0, self.num_samples * 10, 10)
+                if len(train_dataset) == 1:
+                    self.num_samples = 1
+                    sample_indices = np.arange(1)
+                else:
+                    sample_indices = np.arange(0, self.num_samples * 10, 10)
                 samples = concatenate_datasets([self.train_dataset.select(sample_indices), self.test_dataset.select(sample_indices)])
 
-                # for idx, sample in enumerate(samples):
-                #     input_text = []
-                #     assistant_text = ''
-                #     for message in sample['messages']:
-                #         if message['role'] == 'user':
-                #             input_text.append(message)
-                #         elif message['role'] == 'assistant':
-                #             assistant_text += message['content']
+                new_test_perplexities_with_generations = []
+                new_train_perplexities_with_generations = []
+                train_losses_with_generations = []
+                test_losses_with_generations = []
+                for idx, sample in enumerate(samples):
+                    input_text = []
+                    assistant_text = ''
+                    for message in sample['messages']:
+                        if message['role'] == 'user':
+                            input_text.append(message)
+                        elif message['role'] == 'assistant':
+                            assistant_text += message['content']
 
-                #     generated_text = generator(input_text)[0]['generated_text'][-1]['content']
+                    generated_text = generator(input_text)[0]['generated_text'][-1]['content']
 
-                #     # Log individual samples for inspection
-                #     self.accumulated_data.append({
-                #         "global_step": state.global_step,
-                #         "input_text": input_text[0]['content'],
-                #         "assistant": assistant_text,
-                #         "generated_output": generated_text,
-                #         "model_output": sample['model_output'],
-                #         "sentence": sample['sentence']
-                #     })
+                    messages = [message for message in sample['messages']]
+                    messages[-1] = {'content': generated_text + sample['sentence'], 'role': 'assistant'}
+
+                    if state.global_step == 0:
+                        messages[-1] = {'content': sample['sentence'], 'role': 'assistant'}
+                    user_only = [message for message in messages if message['role'] == 'user']
+                    tokenized_user_only = tokenizer.apply_chat_template(user_only, return_dict=True, return_tensors="pt")
+                    len_user_only = tokenized_user_only['input_ids'].shape[1]
+
+                    messages_without_sentence = []
+                    messages_without_sentence.append(messages[0])
+                    if state.global_step == 0:
+                        messages_without_sentence.append({'content': '', 'role': 'user'})
+                    else:
+                        messages_without_sentence.append({'content': generated_text, 'role': 'assistant'})
+                    tokenized_messages_without_sentence = tokenizer.apply_chat_template(messages_without_sentence, return_dict=True, return_tensors="pt")
+                    len_messages_without_sentence = tokenized_messages_without_sentence['input_ids'].shape[1] - 1 # account for EOT token
+
+                    inputs = tokenizer.apply_chat_template(messages, return_dict=True, return_tensors="pt")
+                    inputs['input_ids'] = inputs['input_ids'].to('cuda')
+                    inputs['attention_mask'] = inputs['attention_mask'].to('cuda')
+                    log_probs = get_log_probs(inputs['input_ids'])
+                    assistant_log_probs = log_probs[len_user_only-1:]
+                    loss = -sum(assistant_log_probs) / len(assistant_log_probs)
+                    sentence_log_probs = log_probs[len_messages_without_sentence-1:]
+                    new_perplexity = -sum(sentence_log_probs) / len(sentence_log_probs)
+
+                    if idx >= self.num_samples:
+                        new_test_perplexities_with_generations.append(new_perplexity)
+                        test_losses_with_generations.append(loss)
+                    else:
+                        new_train_perplexities_with_generations.append(new_perplexity)
+                        train_losses_with_generations.append(loss)
+
+
+                    # Log individual samples for inspection
+                    self.accumulated_data.append({
+                        "global_step": state.global_step,
+                        "input_text": input_text[0]['content'],
+                        "assistant": assistant_text,
+                        "generated_output": generated_text,
+                        "model_output": sample['model_output'],
+                        "sentence": sample['sentence']
+                    })
+
 
                 new_test_perplexities = []
                 new_train_perplexities = []
                 train_losses = []
                 test_losses = []
                 for idx, sample in enumerate(samples):
-                    messages = sample['messages']
+                    messages = [message for message in sample['messages']]
                     if state.global_step == 0:
                         messages[-1] = {'content': sample['sentence'], 'role': 'assistant'}
                     user_only = [message for message in messages if message['role'] == 'user']
@@ -385,22 +435,26 @@ class GenerateSamplesCallback(TrainerCallback):
 
 
                 # Log generated samples and accuracies to wandb
-                # table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence"])
-                # for data in self.accumulated_data:
-                #     table.add_data(
-                #         data["global_step"],
-                #         data["input_text"],
-                #         data["assistant"],
-                #         data["generated_output"],
-                #         data["sentence"],
-                #     )
+                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence"])
+                for data in self.accumulated_data:
+                    table.add_data(
+                        data["global_step"],
+                        data["input_text"],
+                        data["assistant"],
+                        data["generated_output"],
+                        data["sentence"],
+                    )
                 wandb.log({
-                    # 'Generated Samples': table,
+                    'Generated Samples': table,
                     'global_step': state.global_step,
                     'new_test_perplexity': sum(new_test_perplexities) / len(new_test_perplexities),
                     'new_train_perplexity': sum(new_train_perplexities) / len(new_train_perplexities),
                     'manual_train_loss': sum(train_losses) / len(train_losses),
-                    'manual_test_loss': sum(test_losses) / len(test_losses)
+                    'manual_test_loss': sum(test_losses) / len(test_losses),
+                    'new_test_perplexity_with_generations': sum(new_test_perplexities_with_generations) / len(new_test_perplexities_with_generations),
+                    'new_train_perplexity_with_generations': sum(new_train_perplexities_with_generations) / len(new_train_perplexities_with_generations),
+                    'manual_train_loss_with_generations': sum(train_losses_with_generations) / len(train_losses_with_generations),
+                    'manual_test_loss_with_generations': sum(test_losses_with_generations) / len(test_losses_with_generations),
                 })
                 model.train()
                 if optimizer and scheduler:
@@ -451,7 +505,7 @@ if __name__ == "__main__":
         else:
             train_data_transformed = [convert_item(item) for item in all_train_data]
     # st()
-    train_dataset = Dataset.from_list(train_data_transformed)
+    train_dataset = Dataset.from_list(train_data_transformed[:1])
 
     # Load test data
     # with open(f"{DATA_DIR}/filtered_openwebmath/sft_test/chunk_0.json", 'r') as f:
