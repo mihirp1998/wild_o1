@@ -16,7 +16,8 @@ import os
 from util import clean_numbers, last_boxed_only, last_boxed_only_string
 import re
 
-DATA_DIR = os.environ['DATA_DIR']
+# DATA_DIR = os.environ['DATA_DIR']
+DATA_DIR = '/grogu/user/lilic'
 
 # Define command-line arguments
 parser = argparse.ArgumentParser(description="SFT Trainer with extended configuration options")
@@ -30,7 +31,7 @@ parser.add_argument("--gradient_checkpointing", action="store_true", help="Enabl
 parser.add_argument("--logging_steps", type=int, default=25, help="Logging interval in steps")
 parser.add_argument("--save_steps", type=int, default=500, help="Logging interval in steps")
 parser.add_argument("--packing", action="store_true", help="Enable data packing")
-parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model name")
+parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name")
 parser.add_argument("--output_dir", type=str, default=f"{DATA_DIR}/hendrycks-sft-openwebmath", help="Directory to save model outputs")
 parser.add_argument("--push_to_hub", action="store_true", help="Push the model to Hugging Face Hub after training")
 parser.add_argument("--rand_train", action="store_true", help="Use random samples for training")
@@ -41,6 +42,8 @@ parser.add_argument("--num_samples", type=int, default=20, help="Samples for eva
 parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eval freq")
 parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
 parser.add_argument("--prompt_version", type=int, default=1, help="Weight decay")
+parser.add_argument('--perplexity_device', type=int, default=1, help='GPU device number for perplexity model (default: 1)')
+parser.add_argument("--debug_with_single_example", action="store_true")
 
 # PEFT arguments
 parser.add_argument("--use_incontext", action="store_true", help="incontext")
@@ -84,12 +87,18 @@ def convert_item(item, rand_item=None):
     return new_item
 
 
-def convert_item_incontext(item, rand_item=None):
+def convert_item_incontext(item, rand_item=None, eos_token=None):
     messages = []
     
     prefix = item.get('prefix', '')
     sentence = item.get('sentence', '')
     model_output = item.get('model_output', '')
+    old_perplexity = item.get('old_perplexity', '')
+    new_perplexity = item.get('new_perplexity', '')
+
+    if 'Sentence #' in model_output: # TODO fix this in dataset generation
+        idx_of_next_sentence = model_output.find('Sentence #')
+        model_output = model_output[:idx_of_next_sentence]
 
     if args.prompt_version == 1:
         prompt = prefix
@@ -101,15 +110,19 @@ def convert_item_incontext(item, rand_item=None):
         raise NotImplementedError
 
     messages.append({'content': prompt, 'role': 'user'})
-    messages.append({'content': model_output + sentence, 'role': 'assistant'})
+    # messages.append({'content': model_output + sentence, 'role': 'assistant'})
+    messages.append({'content': model_output + eos_token, 'role': 'assistant'})
 
     num_turns = len(messages)
 
     new_item = {
         'source': 'GPT4LLM',
         'messages': messages,
+        'prefix': prefix,
         'model_output': model_output,
-        'sentence': sentence
+        'sentence': sentence,
+        'old_perplexity': old_perplexity,
+        'new_perplexity': new_perplexity
     }
     return new_item
 
@@ -155,7 +168,7 @@ def convert_item_hendrycks_math(item):
     }
     return new_item
 
-def get_log_probs(tokens):
+def get_log_probs(tokens, model):
     with torch.no_grad():
         outputs = model(tokens)
         logits = outputs.logits[:, :-1, :]  # Remove last position's prediction
@@ -171,26 +184,22 @@ def get_log_probs(tokens):
             
     return token_log_probs
 
-def get_val_loss(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
-    if tokenized_model_output is not None:
-        tokenized_sentence = torch.cat((tokenized_model_output, tokenized_sentence), dim=0).to('cuda')
-    prefix_length = tokenized_prefix.shape[0]
-    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to('cuda')
-    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0))
-    sentence_log_probs = token_log_probs[prefix_length-1:combined_tokens.shape[0]-1]
-    avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
-    return avg_log_prob
+def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=None, perplexity_device='cpu'):
+    tokenized_prefix = tokenized_prefix.to(perplexity_device)
+    tokenized_sentence = tokenized_sentence.to(perplexity_device)
 
-def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
     if tokenized_model_output is not None:
-        tokenized_prefix = torch.cat((tokenized_prefix, tokenized_model_output), dim=0).to('cuda')
+        tokenized_model_output = tokenized_model_output.to(perplexity_device)
+        tokenized_prefix = torch.cat((tokenized_prefix, tokenized_model_output), dim=0).to(perplexity_device)
     prefix_and_model_output_length = tokenized_prefix.shape[0]
-    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to('cuda')
-    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0))
+    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to(perplexity_device)
+    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0), perplexity_model)
     sentence_log_probs = token_log_probs[prefix_and_model_output_length-1:combined_tokens.shape[0]-1]
     avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
     # perplexity = math.exp(-avg_log_prob)
-    perplexity = -avg_log_prob
+    perplexity = -avg_log_prob # TODO rename from perplexity to NLL
+
+
     return perplexity
 
 class HendrycksMathGenerateSamplesCallback(TrainerCallback):
@@ -220,7 +229,7 @@ class HendrycksMathGenerateSamplesCallback(TrainerCallback):
                     tokenizer=tokenizer,
                     pad_token_id=tokenizer.eos_token_id,
                     max_new_tokens=self.max_new_tokens,
-                    device='cuda'
+                    device=device
                 )
                 sample_indices = np.arange(self.num_samples)
                 samples = self.test_dataset.select(sample_indices)
@@ -290,132 +299,8 @@ def get_text_in_sentences(text):
     numbered_sentences = [(f"Sentence #{i+1}: {sentence}") for i, sentence in enumerate(sentences)]
     return numbered_sentences, len(sentences)
 
-class GenerateSamplesPrivilegedCallback(TrainerCallback):
-    def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
-        self.test_dataset = test_dataset
-        self.tokenizer = tokenizer
-        self.generate_every_n_steps = generate_every_n_steps
-        self.num_samples = num_samples
-        self.accumulated_data = []
-        self.max_new_tokens = max_new_tokens
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        with torch.no_grad():
-            model = kwargs['model']
-            optimizer = kwargs.get('optimizer')
-            scheduler = kwargs.get('lr_scheduler')
-            tokenizer = self.tokenizer
-            if state.global_step % self.generate_every_n_steps == 0:
-                
-                if optimizer and scheduler:
-                    optimizer_state = optimizer.state_dict()
-                    scheduler_state = scheduler.state_dict()
-                    original_scheduler_step = scheduler.step
-                model.eval()
-                generator = transformers.pipeline(
-                    "text-generation",
-                    model=model,
-                    tokenizer=tokenizer,
-                    pad_token_id=tokenizer.eos_token_id,
-                    max_new_tokens=3,
-                    device='cuda'
-                )
-
-                generator2 = transformers.pipeline(
-                    "text-generation",
-                    model=model,
-                    tokenizer=tokenizer,
-                    pad_token_id=tokenizer.eos_token_id,
-                    max_new_tokens=200,
-                    device='cuda'
-                )
-
-                sample_indices = np.arange(self.num_samples)
-                samples = self.test_dataset.select(sample_indices)
-
-                new_test_perplexities = []
-
-                for idx, sample in enumerate(samples):
-                    messages = [] 
-                    lst_text_in_sentences, num_sentences = get_text_in_sentences(sample["text"])
-                    text_in_sentences = " ".join(lst_text_in_sentences)
-                    messages.append({"role": "user", "content": f"{text_in_sentences}\nInstruction: Given the above text, please identify the sentence that is most difficult to understand. Please ignore anything that is not relevant, such as metadata. Please respond in the format of Sentence #<number>, where <number> is a number between 0 and {num_sentences}."})
-                    if len(sample["text"]) > 2000: continue
-
-                    generated_text = generator(messages)[0]['generated_text'][-1]['content']
-
-                    index_of_hash = generated_text.find("#")
-                    if index_of_hash == -1:
-                        # print(f"No sentence number found in response: {generated_text}")
-                        # print('------------------')
-                        continue
-                    sentence_num_str = generated_text[index_of_hash+1:].strip()
-                    if not sentence_num_str.isdigit():
-                        # print(f"Invalid sentence number format: {sentence_num_str}")
-                        # print('------------------')
-                        continue
-                    sentence_num = int(sentence_num_str) - 1
-                    if sentence_num < 0 or sentence_num >= num_sentences:
-                        # print(f"Sentence number {sentence_num + 1} out of range (1-{num_sentences})")
-                        # print('------------------')
-                        continue
-
-                    messages.append({"role": "assistant", "content": f"{generated_text}"})
-                    messages.append({"role": "user", "content": f"Please insert an additional sentence before the selected sentence that would make the sentence easier to understand. Please respond with Sentence #{sentence_num}.5: <sentence>. Do not generate any other text."})
-
-                    generated_text = generator2(messages)[0]['generated_text'][-1]['content']
-                    print(idx, generated_text)
-
-                    processed_sentence = lst_text_in_sentences[sentence_num]
-                    idx_of_actual_sentence = processed_sentence.find(":")
-                    sentence = processed_sentence[idx_of_actual_sentence+1:].strip()
-                    location_of_sentence = sample["text"].find(sentence)
-                    prefix = sample["text"][:location_of_sentence]
-
-                    processed_model_output = generated_text
-                    idx_of_actual_model_output = processed_model_output.find(":")
-                    model_output = processed_model_output[idx_of_actual_model_output+1:].strip() + ' '
-
-                    tokenized_prefix = tokenizer(prefix, return_tensors="pt").to('cuda')['input_ids'][0]
-                    tokenized_sentence = tokenizer(sentence, return_tensors="pt").to('cuda')['input_ids'][0]
-                    tokenized_model_output = tokenizer(model_output, return_tensors="pt").to('cuda')['input_ids'][0]
-
-                    new_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output)
-                    # print(new_perplexity)
-
-                    # Log individual samples for inspection
-                    self.accumulated_data.append({
-                        "global_step": state.global_step,
-                        "text": sample['text'],
-                        "prefix": prefix,
-                        "sentence": sentence,
-                        "model_output": model_output
-                    })
-
-                    new_test_perplexities.append(new_perplexity)
-
-                # Log generated samples and accuracies to wandb
-                table = wandb.Table(columns=["global_step", "text", "prefix", "model_output", "sentence"])
-                for data in self.accumulated_data:
-                    table.add_data(
-                        data["global_step"],
-                        data["text"],
-                        data["prefix"],
-                        data["model_output"],
-                        data["sentence"],
-                    )
-                wandb.log({
-                    'Generated Samples Privileged': table,
-                    'new_test_perplexity_privileged': sum(new_test_perplexities) / len(new_test_perplexities) if len(new_test_perplexities) > 0 else 0,
-                    'global_step': state.global_step})
-                model.train()
-                if optimizer and scheduler:
-                    optimizer.load_state_dict(optimizer_state)
-                    scheduler.load_state_dict(scheduler_state)
-                    scheduler.step = original_scheduler_step
-
 class GenerateSamplesCallback(TrainerCallback):
-    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
+    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400, perplexity_device='cpu'):
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         self.tokenizer = tokenizer
@@ -423,8 +308,10 @@ class GenerateSamplesCallback(TrainerCallback):
         self.num_samples = num_samples
         self.accumulated_data = []
         self.max_new_tokens = max_new_tokens
+        self.perplexity_device = perplexity_device
 
     def on_step_begin(self, args, state, control, **kwargs):
+        perplexity_device = self.perplexity_device
         with torch.no_grad():
             model = kwargs['model']
             optimizer = kwargs.get('optimizer')
@@ -441,19 +328,26 @@ class GenerateSamplesCallback(TrainerCallback):
                     "text-generation",
                     model=model,
                     tokenizer=tokenizer,
-                    pad_token_id=tokenizer.eos_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                     max_new_tokens=self.max_new_tokens,
-                    device='cuda'
+                    device=device,
+                    do_sample=True,
                 )
 
-                # train_sample_indices = np.random.choice(len(self.train_dataset), self.num_samples, replace=False)
-                # test_sample_indices = np.random.choice(len(self.test_dataset), self.num_samples, replace=False)
-                # samples = concatenate_datasets([self.train_dataset.select(train_sample_indices), self.test_dataset.select(test_sample_indices)])
-                sample_indices = np.arange(0, self.num_samples * 10, 10)
+
+                if len(self.train_dataset) == 1:
+                    sample_indices = np.arange(1)
+                    self.num_samples = 1
+                else:
+                    sample_indices = np.arange(0, self.num_samples * 10, 10)
                 samples = concatenate_datasets([self.train_dataset.select(sample_indices), self.test_dataset.select(sample_indices)])
 
                 new_test_perplexities = []
                 new_train_perplexities = []
+                new_test_perplexities_with_generations = []
+                new_train_perplexities_with_generations = []
+                old_test_perplexities = []
+                old_train_perplexities = []
 
                 for idx, sample in enumerate(samples):
                     input_text = []
@@ -466,6 +360,32 @@ class GenerateSamplesCallback(TrainerCallback):
 
                     generated_text = generator(input_text)[0]['generated_text'][-1]['content']
 
+                    prefix = sample['prefix']
+                    sentence = sample['sentence']
+                    model_output = sample['model_output']
+
+                    # print(sample['old_perplexity'], sample['new_perplexity'])
+
+                    tokenized_prefix = perplexity_tokenizer(prefix, return_tensors="pt").to(perplexity_device)['input_ids'][0]
+                    tokenized_sentence = perplexity_tokenizer(sentence, return_tensors="pt").to(perplexity_device)['input_ids'][0]
+                    tokenized_model_output = perplexity_tokenizer(model_output, return_tensors="pt").to(perplexity_device)['input_ids'][0]
+
+                    new_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output, perplexity_device=perplexity_device)
+
+                    tokenized_generated_output = perplexity_tokenizer(generated_text, return_tensors="pt").to(perplexity_device)['input_ids'][0]
+                    new_perplexity_with_generation = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_generated_output, perplexity_device=perplexity_device)
+
+                    old_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, None, perplexity_device=perplexity_device)
+
+                    if idx >= self.num_samples:
+                        new_test_perplexities.append(new_perplexity)
+                        new_test_perplexities_with_generations.append(new_perplexity_with_generation)
+                        old_test_perplexities.append(old_perplexity)
+                    else:
+                        new_train_perplexities.append(new_perplexity)
+                        new_train_perplexities_with_generations.append(new_perplexity_with_generation)
+                        old_train_perplexities.append(old_perplexity)
+
                     # Log individual samples for inspection
                     self.accumulated_data.append({
                         "global_step": state.global_step,
@@ -473,23 +393,13 @@ class GenerateSamplesCallback(TrainerCallback):
                         "assistant": assistant_text,
                         "generated_output": generated_text,
                         "model_output": sample['model_output'],
-                        "sentence": sample['sentence']
+                        "sentence": sample['sentence'],
+                        "old_perplexity": old_perplexity,
+                        "new_perplexity": new_perplexity,
                     })
 
-                    tokenized_input = tokenizer(input_text[0]['content'], return_tensors="pt").to('cuda')['input_ids'][0]
-                    tokenized_sentence = tokenizer(sample['sentence'], return_tensors="pt").to('cuda')['input_ids'][0]
-                    if state.global_step == 0:
-                        new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=None)
-                    else:
-                        tokenized_model_output = tokenizer(generated_text, return_tensors="pt").to('cuda')['input_ids'][0]
-                        new_perplexity = get_perplexity(tokenized_input, tokenized_sentence, tokenized_model_output=tokenized_model_output)
-                    if idx >= self.num_samples:
-                        new_test_perplexities.append(new_perplexity)
-                    else:
-                        new_train_perplexities.append(new_perplexity)
-
                 # Log generated samples and accuracies to wandb
-                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence"])
+                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence", "old_perplexity", "new_perplexity"])
                 for data in self.accumulated_data:
                     table.add_data(
                         data["global_step"],
@@ -497,12 +407,18 @@ class GenerateSamplesCallback(TrainerCallback):
                         data["assistant"],
                         data["generated_output"],
                         data["sentence"],
+                        data["old_perplexity"],
+                        data["new_perplexity"],
                     )
                 wandb.log({
                     'Generated Samples': table,
                     'global_step': state.global_step,
                     'new_test_perplexity': sum(new_test_perplexities) / len(new_test_perplexities),
                     'new_train_perplexity': sum(new_train_perplexities) / len(new_train_perplexities),
+                    'new_test_perplexity_with_generation': sum(new_test_perplexities_with_generations) / len(new_test_perplexities_with_generations),
+                    'new_train_perplexity_with_generation': sum(new_train_perplexities_with_generations) / len(new_train_perplexities_with_generations),
+                    'old_test_perplexity': sum(old_test_perplexities) / len(old_test_perplexities),
+                    'old_train_perplexity': sum(old_train_perplexities) / len(old_train_perplexities),
                 })
                 model.train()
                 if optimizer and scheduler:
@@ -527,13 +443,13 @@ if __name__ == "__main__":
     print(args)
 
     # Initialize wandb
-    wandb.init(project="openwebmath-sft4", group=args.exp_id)
+    wandb.init(project="openwebmath-sft5", group=args.exp_id)
 
     # Load training data
     if args.use_incontext:
         all_train_data = []
         # train_dir = "/home/mprabhud/datasets/o1/filtered_openwebmath/incontext_sft_train"
-        train_dir = "/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_train"
+        train_dir = "/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_train"
         for filename in os.listdir(train_dir):
             if filename.endswith('.json'):
                 with open(os.path.join(train_dir, filename), 'r') as f:
@@ -544,8 +460,25 @@ if __name__ == "__main__":
             all_train_data = json.load(f)
     print(len(all_train_data))
 
+    # Load tokenizer and model
+    model_name = args.model_name
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+    device = "cuda:0"
+    model.to(device)
+    # tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    model.resize_token_embeddings(len(tokenizer))
+    model.config.pad_token_id = tokenizer.pad_token_id
+
+    perplexity_model_name = "meta-llama/Llama-3.1-8B"
+    perplexity_tokenizer = AutoTokenizer.from_pretrained(perplexity_model_name)
+    perplexity_model = AutoModelForCausalLM.from_pretrained(perplexity_model_name)
+    perplexity_device = f'cuda:{args.perplexity_device}' if torch.cuda.is_available() and args.perplexity_device >= 0 else 'cpu'
+    perplexity_model.to(perplexity_device)
+
     if args.use_incontext:
-        train_data_transformed = [convert_item_incontext(item) for i, item in enumerate(all_train_data)]
+        train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
         # st()
     else:
         if args.rand_train:
@@ -553,34 +486,37 @@ if __name__ == "__main__":
         else:
             train_data_transformed = [convert_item(item) for item in all_train_data]
     # st()
-    train_dataset = Dataset.from_list(train_data_transformed)
+    if args.debug_with_single_example:
+        train_dataset = Dataset.from_list(train_data_transformed[:1])
+    else:
+        train_dataset = Dataset.from_list(train_data_transformed)
 
     # Load test data
     # with open(f"{DATA_DIR}/filtered_openwebmath/sft_test/chunk_0.json", 'r') as f:
-    with open("/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_test/chunk_0_elements_0_10000.json", 'r') as f:
+    with open("/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_test/chunk_0_elements_0_1000.json", 'r') as f:
         all_test_data = json.load(f)
     print(len(all_test_data))
 
     if args.use_incontext:
-        test_data_transformed = [convert_item_incontext(item) for item in all_test_data]
+        test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token) for item in all_test_data if len(item['prefix']) > 5]
     else:
         test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
 
     test_ds_privileged = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/test/chunk_0")
 
-    # Load tokenizer and model
-    model_name = args.model_name
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to('cuda')
-    tokenizer.pad_token = tokenizer.eos_token
-
     output_dir = args.output_dir + '/' + args.exp_id
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    # Define a custom SFTConfig class to override n_gpu
+    class MySFTConfig(SFTConfig): # to prevent it from doing dataparallel even though multiple gpus are available
+        @property
+        def n_gpu(self):
+            return 1
+
     # Configure training arguments
-    training_args = SFTConfig(
+    training_args = MySFTConfig(
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -590,13 +526,11 @@ if __name__ == "__main__":
         output_dir=output_dir,
         push_to_hub=args.push_to_hub,
         packing=args.packing,
-        do_eval=True,
-        # evaluation_strategy="steps",
-        # eval_steps=100,   
         save_strategy='no',             
-        # save_strategy='steps',
-        # save_steps=args.save_steps,
-        bf16=True
+        bf16=True,
+        # dataloader_num_workers=0,
+        # local_rank=-1,  # Disable distributed training
+        # no_cuda=False,
     )
     
     start_time = time.time()
@@ -622,15 +556,8 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         generate_every_n_steps=args.generate_every_n_steps,
         num_samples=args.num_samples,
-        max_new_tokens=args.max_new_tokens
-    )
-
-    privileged_callback = GenerateSamplesPrivilegedCallback(
-        test_dataset=test_ds_privileged,
-        tokenizer=tokenizer,
-        generate_every_n_steps=args.generate_every_n_steps,
-        num_samples=args.num_samples,
-        max_new_tokens=args.max_new_tokens
+        max_new_tokens=args.max_new_tokens,
+        perplexity_device=perplexity_device
     )
 
     hendrycks_math_callback = HendrycksMathGenerateSamplesCallback(
@@ -648,7 +575,7 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         peft_config=get_peft_config(args),
         args=training_args,
-        callbacks=[callback, hendrycks_math_callback],
+        callbacks=[callback],#, hendrycks_math_callback],
     )
     
     # Calculate number of trainable parameters

@@ -20,16 +20,57 @@ parser.add_argument("--element_start", type=int, default=0)
 parser.add_argument("--element_end", type=int, default=1000)
 parser.add_argument("--mode", type=str, default='train')
 parser.add_argument("--use_wikipedia", type=int, default=0)
+parser.add_argument('--perplexity_device', type=int, default=1, help='GPU device number for perplexity model (default: 1)')
 
 # Parse arguments
 args = parser.parse_args()
 
 # model_name = "meta-llama/Llama-3.2-3B-Instruct"
-model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
+
+perplexity_model_name = "meta-llama/Llama-3.1-8B"
+perplexity_tokenizer = AutoTokenizer.from_pretrained(perplexity_model_name)
+perplexity_model = AutoModelForCausalLM.from_pretrained(perplexity_model_name)
+perplexity_device = f'cuda:{args.perplexity_device}' if torch.cuda.is_available() and args.perplexity_device >= 0 else 'cpu'
+perplexity_model.to(perplexity_device)
+
+def get_log_probs(tokens, model):
+    with torch.no_grad():
+        outputs = model(tokens)
+        logits = outputs.logits[:, :-1, :]  # Remove last position's prediction
+        target_ids = tokens[:, 1:]  # Shift right by 1 to get next tokens
+        log_probs = torch.log_softmax(logits, dim=-1)
+        
+        # Get log prob of each actual token that appeared
+        token_log_probs = []
+        for i in range(target_ids.shape[1]):
+            token_id = target_ids[0, i]
+            token_log_prob = log_probs[0, i, token_id].item()
+            token_log_probs.append(token_log_prob)
+            
+    return token_log_probs
+
+def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
+    tokenized_prefix = tokenized_prefix.to(perplexity_device)
+    tokenized_sentence = tokenized_sentence.to(perplexity_device)
+
+    if tokenized_model_output is not None:
+        tokenized_model_output = tokenized_model_output.to(perplexity_device)
+        tokenized_prefix = torch.cat((tokenized_prefix, tokenized_model_output), dim=0).to(perplexity_device)
+    prefix_and_model_output_length = tokenized_prefix.shape[0]
+    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to(perplexity_device)
+    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0), perplexity_model)
+    sentence_log_probs = token_log_probs[prefix_and_model_output_length-1:combined_tokens.shape[0]-1]
+    avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
+    perplexity = math.exp(-avg_log_prob)
+
+
+    return perplexity
+    
 
 def get_text_in_sentences(text):
     # Split on period, exclamation mark, question mark, or newline, followed by optional whitespace
@@ -57,33 +98,6 @@ generator2 = transformers.pipeline(
     device='cuda'
 )
 
-def get_log_probs(tokens):
-    with torch.no_grad():
-        outputs = model(tokens)
-        logits = outputs.logits[:, :-1, :]  # Remove last position's prediction
-        target_ids = tokens[:, 1:]  # Shift right by 1 to get next tokens
-        log_probs = torch.log_softmax(logits, dim=-1)
-        
-        # Get log prob of each actual token that appeared
-        token_log_probs = []
-        for i in range(target_ids.shape[1]):
-            token_id = target_ids[0, i]
-            token_log_prob = log_probs[0, i, token_id].item()
-            token_log_probs.append(token_log_prob)
-            
-    return token_log_probs
-
-def get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output=None):
-    if tokenized_model_output is not None:
-        tokenized_prefix = torch.cat((tokenized_prefix, tokenized_model_output), dim=0).to(device)
-    combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to(device)
-    prefix_length = tokenized_prefix.shape[0]
-    token_log_probs = get_log_probs(combined_tokens.unsqueeze(0))
-    sentence_log_probs = token_log_probs[prefix_length-1:combined_tokens.shape[0]-1]
-    avg_log_prob = sum(sentence_log_probs) / len(sentence_log_probs)
-    perplexity = math.exp(-avg_log_prob)
-    return perplexity
-
 mode = args.mode
 
 for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
@@ -91,12 +105,12 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
     
     if not args.use_wikipedia:
         train_ds = load_from_disk(f"/grogu/user/lilic/filtered_openwebmath/{mode}/chunk_{chunk_num}")
-        if not os.path.exists(f"/grogu/user/lilic/filtered_openwebmath/incontextv2_sft_{mode}"):
-            os.makedirs(f"/grogu/user/lilic/filtered_openwebmath/incontext_sftv2_{mode}")
+        if not os.path.exists(f"/grogu/user/lilic/filtered_openwebmath/incontextv3_sft_{mode}"):
+            os.makedirs(f"/grogu/user/lilic/filtered_openwebmath/incontext_sftv3_{mode}")
     else:
         train_ds = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/{mode}/chunk_{chunk_num}")
-        if not os.path.exists(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}"):
-            os.makedirs(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}")
+        if not os.path.exists(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_{mode}"):
+            os.makedirs(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_{mode}")
 
 
     num_total_generations = 0
@@ -159,9 +173,9 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
                 idx_of_actual_model_output = processed_model_output.find(":")
                 model_output = processed_model_output[idx_of_actual_model_output+1:].strip() + ' '
 
-                tokenized_prefix = tokenizer(prefix, return_tensors="pt").to(device)['input_ids'][0]
-                tokenized_sentence = tokenizer(sentence, return_tensors="pt").to(device)['input_ids'][0]
-                tokenized_model_output = tokenizer(model_output, return_tensors="pt").to(device)['input_ids'][0]
+                tokenized_prefix = perplexity_tokenizer(prefix, return_tensors="pt").to(device)['input_ids'][0]
+                tokenized_sentence = perplexity_tokenizer(sentence, return_tensors="pt").to(device)['input_ids'][0]
+                tokenized_model_output = perplexity_tokenizer(model_output, return_tensors="pt").to(device)['input_ids'][0]
 
                 old_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence)
                 new_perplexity = get_perplexity(tokenized_prefix, tokenized_sentence, tokenized_model_output)
@@ -176,13 +190,15 @@ for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
                     new_item = {
                         'prefix': prefix,
                         'sentence': sentence,
-                        'model_output': model_output
+                        'model_output': model_output,
+                        'old_perplexity': old_perplexity,
+                        'new_perplexity': new_perplexity
                     }
 
                     if not args.use_wikipedia:
-                        consolidated_output_path = f"/grogu/user/lilic/filtered_openwebmath/incontextv2_sft_{mode}/chunk_{chunk_num}_elements_{args.element_start}_{args.element_end}.json"
+                        consolidated_output_path = f"/grogu/user/lilic/filtered_openwebmath/incontextv3_sft_{mode}/chunk_{chunk_num}_elements_{args.element_start}_{args.element_end}.json"
                     else:
-                        consolidated_output_path = f"/grogu/user/lilic/wikipedia_openwebmath/incontextv2_sft_{mode}/chunk_{chunk_num}_elements_{args.element_start}_{args.element_end}.json"
+                        consolidated_output_path = f"/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_{mode}/chunk_{chunk_num}_elements_{args.element_start}_{args.element_end}.json"
                     if os.path.exists(consolidated_output_path):
                         with open(consolidated_output_path, 'r') as output_fp:
                             try:
