@@ -396,10 +396,11 @@ class GenerateSamplesCallback(TrainerCallback):
                         "sentence": sample['sentence'],
                         "old_perplexity": old_perplexity,
                         "new_perplexity": new_perplexity,
+                        "new_perplexity_with_generation": new_perplexity_with_generation
                     })
 
                 # Log generated samples and accuracies to wandb
-                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence", "old_perplexity", "new_perplexity"])
+                table = wandb.Table(columns=["global_step", "input_text", "assistant", "generated_output", "sentence", "old_perplexity", "new_perplexity", "new_perplexity_with_generation"])
                 for data in self.accumulated_data:
                     table.add_data(
                         data["global_step"],
@@ -409,6 +410,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         data["sentence"],
                         data["old_perplexity"],
                         data["new_perplexity"],
+                        data["new_perplexity_with_generation"]
                     )
                 wandb.log({
                     'Generated Samples': table,
@@ -443,7 +445,7 @@ if __name__ == "__main__":
     print(args)
 
     # Initialize wandb
-    wandb.init(project="openwebmath-sft5", group=args.exp_id)
+    wandb.init(project="openwebmath-sft6", group=args.exp_id)
 
     # Load training data
     if args.use_incontext:
@@ -575,7 +577,7 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         peft_config=get_peft_config(args),
         args=training_args,
-        callbacks=[callback],#, hendrycks_math_callback],
+        callbacks=[hendrycks_math_callback, callback],
     )
     
     # Calculate number of trainable parameters
