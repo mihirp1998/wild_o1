@@ -1,3 +1,6 @@
 *.pyc
 wandb/
 __pycache__/
+*.pkl
+slurm_logs/
+*.pdf
