@@ -179,21 +179,7 @@ Context: # Abstract
 
 We introduce a framework that abstracts Reinforcement Learning (RL) as a sequence modeling problem. This allows us to draw upon the simplicity and scalability of the Transformer architecture, and associated advances in language modeling such as GPT- $\\mathbf{\\nabla}\\cdot\\mathbf{X}$ and BERT. In particular, we present Decision Transformer, an architecture that casts the problem of RL as conditional sequence modeling. Unlike prior approaches to RL that fit value functions or compute policy gradients, Decision Transformer simply outputs the optimal actions by leveraging a causally masked Transformer. By conditioning an autoregressive model on the desired return (reward), past states, and actions, our Decision Transformer model can generate future actions that achieve the desired return. Despite its simplicity, Decision Transformer matches or exceeds the performance of state-of-the-art model-free offline RL baselines on Atari, OpenAI Gym, and Key-to-Door tasks.
 
-![](images/159bb56663fdc20797d7f186b704a26b31fafeb26f557adfaf3f9b122c3329cb.jpg)
-
-Figure 1: Decision Transformer architecture. States, actions, and returns are fed into modality-specific linear embeddings and a positional episodic timestep encoding is added. Tokens are fed into a GPT architecture which predicts actions autoregressively using a causal self-attention mask.
-
-![](images/1781c579011fe2b389eb7ea4acbc17f4b62be74477fa618633c58808f1cd7349.jpg)
-
-Figure 2: Illustrative example of finding shortest path for a fixed graph (left) posed as reinforcement learning. Training dataset consists of random walk trajectories and their per-node returns-to-go (middle). Conditioned on a starting state and generating largest possible return at each node, Decision Transformer sequences optimal paths.
-
 # 2 Preliminaries
-
-# 2.1 Offline reinforcement learning
-
-We consider learning in a Markov decision process (MDP) described by the tuple $(S,{\\mathcal{A}},P,{\\mathcal{R}})$. The MDP tuple consists of states $s\\in S$, actions $a\\in A$, transition dynamics $P(s^{\\prime}|s,a)$, and a reward function $r=\\mathcal{R}(s,a)$. We use $s_{t}$, $a_{t}$, and $r_{t}=\\mathcal{R}(s_{t},a_{t})$ to denote the state, action, and reward at timestep $t$, respectively. The goal in reinforcement learning is to learn a policy which maximizes the expected return $\\mathbb{E}\\left[\\sum_{t=1}^{T}r_{t}\\right]$ in an MDP. In offline reinforcement learning, instead of obtaining data via environment interactions, we only have access to some fixed limited dataset consisting of trajectories from the environment. This setting is harder as it removes the ability for agents to explore the environment and collect additional feedback.
-
-# 2.2 Transformers
 
 Transformers were proposed by Vaswani et al. [1] as an architecture to efficiently model sequences. They consist of stacked self-attention layers with residual connections. Each self-attention layer receives $n$ embeddings $\\{x_{i}\\}_{i=1}^{n}$ corresponding to unique input tokens, and outputs $n$ embeddings $\\{z_{i}\\}_{i=1}^{n}$, preserving the input dimensions. The $i$-th token is mapped via linear transformations to a key $k_{i}$, query $q_{i}$, and value $v_{i}$. The $i$-th output of the self-attention layer is given by weighting the values $v_{j}$ by the normalized dot product between the query $q_{i}$ and other keys $k_{j}$.
 
@@ -201,8 +187,6 @@ Equation:
 $$
 z_{i}=\\sum_{j=1}^{n}\\mathsf{s o f}\\mathsf{t m a x}(\\{\\langle q_{i},k_{j^{\\prime}}\\rangle\\}_{j^{\\prime}=1}^{n})_{j}\\cdot v_{j}.
 $$
-
-Instruction: Given the context, please generate a short chain of thought (less than 3 sentences) to explain how you arrived at the equation.
 """
 
 
@@ -213,8 +197,8 @@ one_shot_response = "To derive the equation for the self-attention mechanism, we
 for idx,md_file in enumerate(all_md_files):
     if idx < args.element_start or idx >= args.element_end:
         continue
-    # print(f"Processing paper {idx}, total time has been {time.time() - start_time} seconds")
-    # print(f'Num total generations: {num_total_generations}, Num added generations: {num_added_generations}')
+    print(f"Processing paper {idx}, total time has been {time.time() - start_time} seconds")
+    print(f'Num total generations: {num_total_generations}, Num added generations: {num_added_generations}')
 
     info_file = '/'.join(md_file.split('/')[:-1] + ['info.json'])
     with open(info_file, 'r') as f:
@@ -243,18 +227,22 @@ for idx,md_file in enumerate(all_md_files):
 
         equation_indices = get_indices_of_equations(content)
 
-        for _ in range(5):
+        equation_indices = equation_indices[:5]
+        print(equation_indices)
+
+        for j in range(5):
 
             for eqn_start, eqn_end in equation_indices:
                 messages = [{"role": "user", "content": one_shot_prompt}, {"role": "assistant", "content": one_shot_response}]
                 prefix = abstract + content[:eqn_start]
                 equation = content[eqn_start:eqn_end]
-                prompt = f'Context: {prefix}\nEquation: {equation}\nInstruction: Given the context, please generate a short chain of thought (less than 3 sentences) to explain how you arrived at the equation.'
+                prompt = f'Context: {prefix}\nEquation: {equation}\nInstruction: Given the Context, please generate a chain of thought (less than 3 sentences) to explain how you arrived at the Equation. Do not put the given Equation in your response. Please use "we" instead of "I" and write as if you are adding text to the paper.'
 
                 messages.append({"role": "user", "content": prompt})
 
                 generated_text = generator2(messages)[0]['generated_text'][-1]['content']
-                print(generated_text)
+                if j == 0:
+                    print(generated_text)
 
                 tokenized_prefix = perplexity_tokenizer(prefix, return_tensors="pt").to(device)['input_ids'][0]
                 tokenized_equation = perplexity_tokenizer(equation, return_tensors="pt").to(device)['input_ids'][0]
@@ -262,12 +250,14 @@ for idx,md_file in enumerate(all_md_files):
 
                 old_perplexity = get_perplexity(tokenized_prefix, tokenized_equation)
                 new_perplexity = get_perplexity(tokenized_prefix, tokenized_equation, tokenized_model_output)
-                print(f"Old perplexity: {old_perplexity}, New perplexity: {new_perplexity}")
+                if j == 0:
+                    print(f"Old perplexity: {old_perplexity}, New perplexity: {new_perplexity}")
                 num_total_generations += 1
 
                 if new_perplexity < old_perplexity:
                     num_added_generations += 1
-                    print('Adding to dataset')
+                    if j == 0:
+                        print('Adding to dataset')
 
                     new_item = {
                         'prefix': prefix,
@@ -292,7 +282,8 @@ for idx,md_file in enumerate(all_md_files):
                     # Write the updated list back to the single file
                     with open(consolidated_output_path, 'w') as output_fp:
                         json.dump(all_data, output_fp, indent=4)
-                print('------------------')
+                if j == 0:
+                    print('------------------')
 
         
         
