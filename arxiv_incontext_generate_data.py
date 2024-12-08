@@ -6,7 +6,7 @@ import glob
 import os
 import ipdb
 st = ipdb.set_trace
-
+from collections import defaultdict
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
@@ -168,9 +168,10 @@ num_total_generations = 0
 num_added_generations = 0
 
 mode = args.mode
+datadir = os.environ['DATA_DIR']
 
-if not os.path.exists(f"/grogu/user/lilic/arxiv_cot/incontext_sft_{mode}"):
-    os.makedirs(f"/grogu/user/lilic/arxiv_cot/incontext_sft_{mode}")
+if not os.path.exists(f"{datadir}/arxiv_cot/incontext_sft_{mode}"):
+    os.makedirs(f"{datadir}/arxiv_cot/incontext_sft_{mode}")
 
 start_time = time.time()
 
@@ -209,7 +210,7 @@ for idx,md_file in enumerate(all_md_files):
         # print(f'{idx}/{len(all_md_files)}')
         with open(md_file, "r") as f:
             content = f.read()
-
+        og_content = content
         headings = []
         for line in content.split('\n')[1:]:
             if line.strip().startswith('#'):
@@ -229,9 +230,10 @@ for idx,md_file in enumerate(all_md_files):
 
         equation_indices = equation_indices[:5]
         print(equation_indices)
-
+        visualize_data = False
+        all_generated_texts = defaultdict(list)
         for j in range(5):
-
+            print(f'Generating for {j}')
             for eqn_start, eqn_end in equation_indices:
                 messages = [{"role": "user", "content": one_shot_prompt}, {"role": "assistant", "content": one_shot_response}]
                 prefix = abstract + content[:eqn_start]
@@ -253,38 +255,78 @@ for idx,md_file in enumerate(all_md_files):
                 if j == 0:
                     print(f"Old perplexity: {old_perplexity}, New perplexity: {new_perplexity}")
                 num_total_generations += 1
-
+                
+                
                 if new_perplexity < old_perplexity:
                     num_added_generations += 1
-                    if j == 0:
-                        print('Adding to dataset')
-
-                    new_item = {
-                        'prefix': prefix,
-                        'equation': equation,
-                        'model_output': generated_text,
-                        'old_perplexity': old_perplexity,
-                        'new_perplexity': new_perplexity
-                    }
-
-                    consolidated_output_path = f"/grogu/user/lilic/arxiv_cot/incontext_sft_{mode}/elements_{args.element_start}_{args.element_end}.json"
-                    if os.path.exists(consolidated_output_path):
-                        with open(consolidated_output_path, 'r') as output_fp:
-                            try:
-                                all_data = json.load(output_fp)
-                            except json.JSONDecodeError:
-                                all_data = []  # Start with an empty list if the file is corrupted or empty
+                    if visualize_data:
+                        print(f'Adding to dataset: {generated_text}')
+                        all_generated_texts[equation].append((generated_text, new_perplexity, old_perplexity))
                     else:
-                        all_data = []  # Start with an empty list if the file does not exist
+                        if j == 0:
+                            print('Adding to dataset')
 
-                    all_data.append(new_item)
+                        new_item = {
+                            'prefix': prefix,
+                            'equation': equation,
+                            'model_output': generated_text,
+                            'old_perplexity': old_perplexity,
+                            'new_perplexity': new_perplexity
+                        }
 
-                    # Write the updated list back to the single file
-                    with open(consolidated_output_path, 'w') as output_fp:
-                        json.dump(all_data, output_fp, indent=4)
-                if j == 0:
-                    print('------------------')
+                        consolidated_output_path = f"{datadir}/arxiv_cot/incontext_sft_{mode}/elements_{args.element_start}_{args.element_end}.json"
+                        if os.path.exists(consolidated_output_path):
+                            with open(consolidated_output_path, 'r') as output_fp:
+                                try:
+                                    all_data = json.load(output_fp)
+                                except json.JSONDecodeError:
+                                    all_data = []  # Start with an empty list if the file is corrupted or empty
+                        else:
+                            all_data = []  # Start with an empty list if the file does not exist
 
+                        all_data.append(new_item)
+
+                        # Write the updated list back to the single file
+                        with open(consolidated_output_path, 'w') as output_fp:
+                            json.dump(all_data, output_fp, indent=4)
+                    if j == 0:
+                        print('------------------')
+        
+        if visualize_data:
+            best_completions = {}
+            for equation, completions in all_generated_texts.items():
+                if completions:  # Only process if there are completions for this equation
+                    # Sort by new_perplexity (index 1 in tuple) and take the best one
+                    index_val = og_content.find(equation)
+                    before_equation = og_content[:index_val]
+                    after_equation = og_content[index_val:]
+                    all_completions = ""
+                    for completion, new_perp, old_perp in completions:
+                        all_completions += f'\n\n\n COT: {completion}, \n before perplexity: {old_perp}, after perplexity: {new_perp}\n\n\n'
+                    og_content = before_equation + "<span style=\"color:blue\">\n\n Completions Start:" + all_completions + "\n Completions End \n\n</span>" + after_equation 
+            # Save the markdown content to a file
+            filename = md_file.split("/")[-2]
+            output_md_path = f"/home/mprabhud/phd_projects/wild_o1/arxiv_cot/{filename}_coted.md"
+            with open(output_md_path, 'w') as f:
+                f.write(og_content)
+
+        # # Save the best completions to file
+        # consolidated_output_path = f"/home/mprabhud/phd_projects/wild_o1/arxiv_cot/incontext_sft_{args.mode}/elements_{args.element_start}_{args.element_end}.json"
+        
+        # output_data = []
+        # for equation, (completion, new_perp, old_perp) in best_completions.items():
+        #     output_data.append({
+        #         'prefix': prefix,
+        #         'equation': equation, 
+        #         'model_output': completion,
+        #         'old_perplexity': old_perp,
+        #         'new_perplexity': new_perp
+        #     })
+
+        # # Write to file
+        # with open(consolidated_output_path, 'w') as output_fp:
+        #     json.dump(output_data, output_fp, indent=4)
+        # print('done')
         
         
 print('done')
