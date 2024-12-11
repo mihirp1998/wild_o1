@@ -16,8 +16,7 @@ import os
 from util import clean_numbers, last_boxed_only, last_boxed_only_string
 import re
 
-# DATA_DIR = os.environ['DATA_DIR']
-DATA_DIR = '/grogu/user/lilic'
+DATA_DIR = os.environ['DATA_DIR']
 
 # Define command-line arguments
 parser = argparse.ArgumentParser(description="SFT Trainer with extended configuration options")
@@ -37,7 +36,8 @@ parser.add_argument("--push_to_hub", action="store_true", help="Push the model t
 parser.add_argument("--rand_train", action="store_true", help="Use random samples for training")
 parser.add_argument("--exp_id", type=str, default='0000', help="Experiment ID")
 parser.add_argument("--use_n_shot_prompt", type=int, default=0, help="Whether to use n-shot prompt")
-parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tokens to generate")
+parser.add_argument("--max_new_tokens", type=int, default=200, help="Max new tokens to generate")
+parser.add_argument("--max_seq_length", type=int, default=1024, help="Max sequence length")
 parser.add_argument("--num_samples", type=int, default=20, help="Samples for evaluation")
 parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eval freq")
 parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
@@ -95,7 +95,6 @@ def convert_item_incontext(item, rand_item=None, eos_token=None):
     model_output = item.get('model_output', '')
     old_perplexity = item.get('old_perplexity', '')
     new_perplexity = item.get('new_perplexity', '')
-
     if 'Sentence #' in model_output: # TODO fix this in dataset generation
         idx_of_next_sentence = model_output.find('Sentence #')
         model_output = model_output[:idx_of_next_sentence]
@@ -169,7 +168,7 @@ def get_text_in_sentences(text):
     return numbered_sentences, len(sentences)
 
 class GenerateSamplesCallback(TrainerCallback):
-    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400, perplexity_device='cpu'):
+    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=1024, perplexity_device='cpu'):
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         self.tokenizer = tokenizer
@@ -225,8 +224,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         if message['role'] == 'user':
                             input_text.append(message)
                         elif message['role'] == 'assistant':
-                            assistant_text += message['content']
-
+                            assistant_text += message['content']            
                     generated_text = generator(input_text)[0]['generated_text'][-1]['content']
 
                     prefix = sample['prefix']
@@ -319,7 +317,7 @@ if __name__ == "__main__":
     if args.use_incontext:
         all_train_data = []
         # train_dir = "/home/mprabhud/datasets/o1/filtered_openwebmath/incontext_sft_train"
-        train_dir = "/grogu/user/lilic/arxiv_cot/incontext_sft_train"
+        train_dir = f"{DATA_DIR}/arxiv_cot/incontext_sft_train"
         for filename in os.listdir(train_dir):
             if filename.endswith('.json'):
                 with open(os.path.join(train_dir, filename), 'r') as f:
@@ -363,7 +361,7 @@ if __name__ == "__main__":
 
     # Load test data
     # with open(f"{DATA_DIR}/filtered_openwebmath/sft_test/chunk_0.json", 'r') as f:
-    with open("/grogu/user/lilic/arxiv_cot/incontext_sft_test/elements_2000_2065.json", 'r') as f:
+    with open(f"{DATA_DIR}/arxiv_cot/incontext_sft_test/elements_2000_2065.json", 'r') as f:
         all_test_data = json.load(f)
     print(len(all_test_data))
 
@@ -373,7 +371,7 @@ if __name__ == "__main__":
         test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
 
-    test_ds_privileged = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/test/chunk_0")
+    test_ds_privileged = load_from_disk(f"{DATA_DIR}/wikipedia_openwebmath/test/chunk_0")
 
     output_dir = args.output_dir + '/' + args.exp_id
     if not os.path.exists(output_dir):
@@ -396,6 +394,7 @@ if __name__ == "__main__":
         output_dir=output_dir,
         push_to_hub=args.push_to_hub,
         packing=args.packing,
+        max_seq_length=args.max_seq_length,
         save_strategy='no',             
         bf16=True,
         # dataloader_num_workers=0,
@@ -413,7 +412,6 @@ if __name__ == "__main__":
         max_new_tokens=args.max_new_tokens,
         perplexity_device=perplexity_device
     )
-
     # Initialize trainer
     trainer = SFTTrainer(
         model=model,
@@ -423,11 +421,8 @@ if __name__ == "__main__":
         args=training_args,
         callbacks=[callback],
     )
-    
     # Calculate number of trainable parameters
     num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainable parameters: {num_trainable_params:,}")
-    # st()
-
     # Train model
     trainer.train()

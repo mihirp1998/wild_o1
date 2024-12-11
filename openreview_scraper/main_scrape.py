@@ -48,5 +48,4 @@ scraper.add_filter(title_filter)
 scraper.add_filter(keywords_filter)
 scraper.add_filter(abstract_filter)
 
-st()
 scraper()

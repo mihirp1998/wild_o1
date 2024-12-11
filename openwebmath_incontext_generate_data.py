@@ -1,5 +1,7 @@
 from datasets import load_dataset, load_from_disk, Dataset
 import json
+import ipdb
+st = ipdb.set_trace
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import math
@@ -99,18 +101,18 @@ generator2 = transformers.pipeline(
 )
 
 mode = args.mode
-
+DATA_DIR = os.environ['DATA_DIR']
 for chunk_num in range(int(args.chunk_start), int(args.chunk_end)):
     start_time = time.time()
     
     if not args.use_wikipedia:
-        train_ds = load_from_disk(f"/grogu/user/lilic/filtered_openwebmath/{mode}/chunk_{chunk_num}")
-        if not os.path.exists(f"/grogu/user/lilic/filtered_openwebmath/incontextv3_sft_{mode}"):
-            os.makedirs(f"/grogu/user/lilic/filtered_openwebmath/incontext_sftv3_{mode}")
+        train_ds = load_from_disk(f"{DATA_DIR}/filtered_openwebmath/{mode}/chunk_{chunk_num}")
+        if not os.path.exists(f"{DATA_DIR}/filtered_openwebmath/incontextv4_sft_{mode}"):
+            os.makedirs(f"{DATA_DIR}/filtered_openwebmath/incontextv4_sft_{mode}")
     else:
-        train_ds = load_from_disk(f"/grogu/user/lilic/wikipedia_openwebmath/{mode}/chunk_{chunk_num}")
-        if not os.path.exists(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_{mode}"):
-            os.makedirs(f"/grogu/user/lilic/wikipedia_openwebmath/incontextv3_sft_{mode}")
+        train_ds = load_from_disk(f"{DATA_DIR}/wikipedia_openwebmath/{mode}/chunk_{chunk_num}")
+        if not os.path.exists(f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_{mode}"):
+            os.makedirs(f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_{mode}")
 
 
     num_total_generations = 0
