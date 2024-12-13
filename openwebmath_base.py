@@ -49,11 +49,12 @@ parser.add_argument("--use_n_shot_prompt", type=int, default=0, help="Whether to
 parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tokens to generate")
 parser.add_argument("--num_samples", type=int, default=20, help="Samples for evaluation")
 parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eval freq")
+parser.add_argument("--max_seq_length", type=int, default=1024, help="Max sequence length")
 parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
 parser.add_argument("--prompt_version", type=int, default=1, help="Weight decay")
 parser.add_argument('--perplexity_device', type=int, default=1, help='GPU device number for perplexity model (default: 1)')
 parser.add_argument("--debug_with_single_example", action="store_true")
-parser.add_argument("--eval_steps", type=int, default=100, help="Eval freq")
+parser.add_argument("--eval_steps", type=int, default=500, help="Eval freq")
 
 # PEFT arguments
 parser.add_argument("--use_incontext", action="store_true", help="incontext")
@@ -196,12 +197,13 @@ def get_log_probs(tokens, model):
             token_id = target_ids[0, i]
             token_log_prob = log_probs[0, i, token_id].item()
             token_log_probs.append(token_log_prob)
-            
     return token_log_probs
 
 def get_perplexity(prefix, sentence, model, tokenizer):
     tokenized_prefix = tokenizer(prefix, return_tensors="pt")['input_ids'][0]
     tokenized_sentence = tokenizer(sentence, return_tensors="pt")['input_ids'][0]
+    # remove bos token from sentence
+    tokenized_sentence = tokenized_sentence[1:]
 
     prefix_length = tokenized_prefix.shape[0]
     combined_tokens = torch.cat((tokenized_prefix, tokenized_sentence), dim=0).to(model.device)
@@ -406,7 +408,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         input_text_vis = input_text[0]['content']
 
                     prefix = sample['prefix']
-                    sentence = sample['sentence']
+                    sentence = sample['sentence'] + eos_token
                     model_output = sample['model_output']
                     
                     # print("\n\n", "model_output", model_output, "\n\n")
@@ -475,7 +477,7 @@ def get_peft_config(args):
         peft_config = LoraConfig(
             r=args.lora_r, 
             lora_alpha=args.lora_alpha,
-            # modules_to_save=["embed_tokens", "lm_head"],
+            modules_to_save=["embed_tokens", "lm_head"],
         )
         return peft_config
     return None
@@ -589,9 +591,10 @@ if __name__ == "__main__":
         logging_steps=args.logging_steps,
         output_dir=output_dir,
         push_to_hub=args.push_to_hub,
+        max_seq_length=args.max_seq_length,
         packing=args.packing,
         save_strategy='steps',
-        eval_strategy='steps',
+        eval_strategy=args.eval_strategy,
         eval_steps=args.eval_steps,
         save_total_limit=3,
         save_steps=args.save_steps,   

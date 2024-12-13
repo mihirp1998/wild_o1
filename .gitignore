@@ -1,5 +1,6 @@
 *.pyc
 wandb/
+arxiv_cot/*
 __pycache__/
 *.pkl
 slurm_logs/
