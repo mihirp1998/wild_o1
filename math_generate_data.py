@@ -6,6 +6,9 @@ import json
 from util import clean_numbers, last_boxed_only, last_boxed_only_string
 from math_equivalence import is_equiv
 import argparse
+import transformers
+import glob
+import time
 
 HF_TOKEN = "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"
 HF_TOKEN[:3]+'...'
@@ -14,6 +17,7 @@ parser = argparse.ArgumentParser(description="Run model on MATH dataset.")
 parser.add_argument("--model_name", type=str, required=True, help="Path to the model checkpoint or Hugging Face model name.")
 parser.add_argument("--consolidated_output_path", type=str, required=True, help="Path to the output JSON file.")
 parser.add_argument("--subdir", type=str, required=True, help="Directory path for the MATH dataset subset (e.g., prealgebra).")
+parser.add_argument("--num_generations_per_problem", type=int, default=1, help="Number of generations per problem.")
 
 args = parser.parse_args()
 
@@ -39,37 +43,37 @@ def remove_boxed(s):
 
 rootdir = "/grogu/user/lilic/MATH/MATH/train"
 
+generator = transformers.pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=1000,
+    device=device,
+    do_sample=True,
+    num_return_sequences=args.num_generations_per_problem
+)
+
 def call_model(problem, answer):
     '''
     Given a problem and its answer, returns the model's chain of thought explanation.
     '''
-    # New prompt format
-    test_question = (
+    prompt = (
         f"\nProblem: {problem}\nAnswer: {answer}\n"
-        "Given the above math problem and answer, can you produce a chain of thought (less than 200 tokens) to explain how you arrived at the answer?"
+        "Instruction: Please produce a chain of thought (less than 200 tokens) to explain how you arrived at the answer. Please put the final answer in \\boxed{}."
     )
-    prompt = test_question
-
-    # Tokenize the prompt and move to device
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    # Generate the output
+    messages = [
+        {"role": "user", "content": prompt}
+    ]
+
+    outputs = []
     with torch.no_grad():
-        outputs = model.generate(
-            inputs["input_ids"],
-            max_length=inputs["input_ids"].shape[1] + 200,  # Adjust as needed
-            temperature=1.0,
-            num_return_sequences=1,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-
-    # Get the generated tokens (excluding the prompt)
-    generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-
-    # Decode the generated tokens
-    final_answer = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    return final_answer
+        generations = generator(messages)
+        for gen in generations:
+            outputs.append(gen['generated_text'][-1]['content'])
+    
+    return outputs
 
 def run(max=-1):
     outputs = []
@@ -84,11 +88,14 @@ def run(max=-1):
     correct = 0
     total = 0
 
+    start_time = time.time()
+
     for subdir, dirs, files in os.walk(rootdir):
         # if subdir == '/grogu/user/lilic/MATH/MATH/train/prealgebra':
         if subdir == args.subdir:
             for file in files:
                 fnames_list.append(os.path.join(subdir, file))
+                num_overall = len(glob.glob(subdir + "/*"))
                 with open(os.path.join(subdir, file), 'r') as fp:
                     try:
                         problem_data = json.load(fp)
@@ -102,55 +109,56 @@ def run(max=-1):
                     except:
                         prob_level = None
 
-                    print(problem_data["problem"])
-                    print('-----------------------------------')
-                    if total > 10:
-                        break
+                    all_model_outputs = call_model(problem_data["problem"], remove_boxed(last_boxed_only_string(problem_data["solution"])))
+                    for j in range(args.num_generations_per_problem):
+                        model_output = all_model_outputs[j]
 
-                    # model_output = call_model(train_prompt, problem_data["problem"])
-                    # model_output = call_model(problem_data["problem"], remove_boxed(last_boxed_only_string(problem_data["solution"])))
+                        generated_answer = remove_boxed(last_boxed_only_string(model_output))
+                        ground_truth_answer = remove_boxed(last_boxed_only_string(problem_data["solution"]))
+                        if generated_answer == ground_truth_answer:
+                            # Path to the consolidated output file
+                            category = subdir.split("/")[-1]
+                            output_filename = args.consolidated_output_path + f"/{category}.json"
 
+                            # Check if the file exists to either initialize it as an empty list or load existing data
+                            if os.path.exists(output_filename):
+                                with open(output_filename, 'r') as output_fp:
+                                    try:
+                                        all_data = json.load(output_fp)
+                                    except json.JSONDecodeError:
+                                        all_data = []  # Start with an empty list if the file is corrupted or empty
+                            else:
+                                all_data = []  # Start with an empty list if the file does not exist
+                                os.makedirs(os.path.dirname(args.consolidated_output_path), exist_ok=True)
 
-                    # # Path to the consolidated output file
-                    # consolidated_output_path = args.consolidated_output_path # "/grogu/user/lilic/MATH/MATH/sft_train/prealgebra_data4.json"
+                            # Prepare the new entry
+                            output_data = {
+                                "problem": problem_data["problem"],
+                                "solution": problem_data["solution"],
+                                "model_output": model_output,
+                                "level": problem_data["level"],
+                                "type": problem_data["type"]
+                            }
 
-                    # # Check if the file exists to either initialize it as an empty list or load existing data
-                    # if os.path.exists(consolidated_output_path):
-                    #     with open(consolidated_output_path, 'r') as output_fp:
-                    #         try:
-                    #             all_data = json.load(output_fp)
-                    #         except json.JSONDecodeError:
-                    #             all_data = []  # Start with an empty list if the file is corrupted or empty
-                    # else:
-                    #     all_data = []  # Start with an empty list if the file does not exist
+                            # Append the new entry to the list
+                            all_data.append(output_data)
 
-                    # # Prepare the new entry
-                    # output_data = {
-                    #     "problem": problem_data["problem"],
-                    #     "solution": problem_data["solution"],
-                    #     "model_output": model_output,
-                    #     "level": problem_data["level"],
-                    #     "type": problem_data["type"]
-                    # }
+                            # Write the updated list back to the single file
+                            with open(output_filename, 'w') as output_fp:
+                                json.dump(all_data, output_fp, indent=4)
 
-                    # # Append the new entry to the list
-                    # all_data.append(output_data)
+                        if j == 0:
+                            print("Problem:")
+                            print(problem_data["problem"])
+                            print("Model output:")
+                            print(model_output)
+                            print("Correct answer:")
+                            print(problem_data["solution"])
+                            print("-------------------------------------------------------------------")
 
-                    # # Write the updated list back to the single file
-                    # with open(consolidated_output_path, 'w') as output_fp:
-                    #     json.dump(all_data, output_fp, indent=4)
-
-                    # print("Problem:")
-                    # print(problem_data["problem"])
-                    # print("Model output:")
-                    # print(model_output)
-                    # print("Correct answer:")
-                    # print(problem_data["solution"])
-                    # print("--------------------------------------------")
-
-                    total += 1
-                    print(total)
-                    print('---')
+                        total += 1
+                        print(f"{total}/{num_overall * args.num_generations_per_problem} processed. time has been {time.time() - start_time} seconds")
+                        print('---')
 
                 if max > 0 and total >= max:
                     break
