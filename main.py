@@ -24,43 +24,7 @@ if "CKPT_DIR" in os.environ:
     CKPT_DIR = os.environ['CKPT_DIR']
 else:
     CKPT_DIR = None
-# DATA_DIR = '/grogu/user/lilic'
 
-# Define command-line arguments
-parser = argparse.ArgumentParser(description="SFT Trainer with extended configuration options")
-
-# Training and evaluation arguments
-parser.add_argument("--causal_llm", action="store_true", help="Use causal LLM")
-parser.add_argument("--learning_rate", type=float, default=2.0e-4, help="Learning rate for training")
-parser.add_argument("--num_train_epochs", type=int, default=500, help="Number of training epochs")
-parser.add_argument("--per_device_train_batch_size", type=int, default=2, help="Batch size per device")
-parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Gradient accumulation steps")
-parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing")
-parser.add_argument("--logging_steps", type=int, default=25, help="Logging interval in steps")
-parser.add_argument("--save_steps", type=int, default=2500, help="Logging interval in steps")
-parser.add_argument("--packing", action="store_true", help="Enable data packing")
-parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name")
-parser.add_argument("--output_dir", type=str, default=f"{CKPT_DIR}", help="Directory to save model outputs")
-parser.add_argument("--load_dir", type=str, default=None, help="Directory to load model from")
-parser.add_argument("--eval_strategy", type=str, default="steps", help="Evaluation strategy")
-parser.add_argument("--push_to_hub", action="store_true", help="Push the model to Hugging Face Hub after training")
-parser.add_argument("--rand_train", action="store_true", help="Use random samples for training")
-parser.add_argument("--use_n_shot_prompt", type=int, default=0, help="Whether to use n-shot prompt")
-parser.add_argument("--max_new_tokens", type=int, default=400, help="Max new tokens to generate")
-parser.add_argument("--num_samples", type=int, default=20, help="Samples for evaluation")
-parser.add_argument("--generate_every_n_steps", type=int, default=500, help="Eval freq")
-parser.add_argument("--max_seq_length", type=int, default=1024, help="Max sequence length")
-parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
-parser.add_argument("--prompt_version", type=int, default=1, help="Weight decay")
-parser.add_argument('--perplexity_device', type=int, default=1, help='GPU device number for perplexity model (default: 1)')
-parser.add_argument("--debug_with_single_example", action="store_true")
-parser.add_argument("--eval_steps", type=int, default=500, help="Eval freq")
-
-# PEFT arguments
-parser.add_argument("--use_incontext", action="store_true", help="incontext")
-parser.add_argument("--use_peft", action="store_true", help="Enable PEFT")
-parser.add_argument("--lora_r", type=int, default=32, help="PEFT LoRA rank")
-parser.add_argument("--lora_alpha", type=int, default=16, help="PEFT LoRA alpha")
 
 def remove_boxed(s):
     left = "\\boxed{"
@@ -501,20 +465,19 @@ def formatting_prompts_func(examples):
     return texts
 
 
-
-if __name__ == "__main__":
+@hydra.main(config_path="configs", config_name="config")
+def main(cfg):
     # Parse arguments
-    args = parser.parse_args()
-    print(args)
-    print("save steps", args.save_steps)
+    print(cfg)
+    print("save steps", cfg.save_steps)
     print("Ranks:", os.environ.get('LOCAL_RANK'))
 
     # Initialize wandb
     if os.environ.get('LOCAL_RANK', '0') == '0':
-        wandb.init(project="openwebmath-sft6", config=args)
+        wandb.init(project="openwebmath-sft6", config=cfg)
 
     # Load training data
-    if args.use_incontext:
+    if cfg.use_incontext:
         all_train_data = []
         train_dir = f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_train"
         for filename in os.listdir(train_dir):
@@ -529,12 +492,11 @@ if __name__ == "__main__":
         print(len(all_train_data))
 
     # Load tokenizer and model
-    model_name = args.model_name
+    model_name = cfg.model_name
     tokenizer = AutoTokenizer.from_pretrained(model_name)
         
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
         
-    
     device = "cuda:0"
     model.to(device)
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -542,17 +504,17 @@ if __name__ == "__main__":
     model.resize_token_embeddings(len(tokenizer))
     model.config.pad_token_id = tokenizer.pad_token_id
     eos_token = tokenizer.eos_token
-    causal_llm = args.causal_llm
+    causal_llm = cfg.causal_llm
 
-    if args.use_incontext:
+    if cfg.use_incontext:
         train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, causal_llm=False) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
     else:
-        if args.rand_train:
+        if cfg.rand_train:
             train_data_transformed = [convert_item(item, rand_item=all_train_data[np.random.randint(len(all_train_data))]) for i, item in enumerate(all_train_data)]
         else:
             train_data_transformed = [convert_item(item) for item in all_train_data]
 
-    if args.debug_with_single_example:
+    if cfg.debug_with_single_example:
         train_dataset = Dataset.from_list(train_data_transformed[:1])
     else:
         train_dataset = Dataset.from_list(train_data_transformed)
@@ -563,14 +525,14 @@ if __name__ == "__main__":
     if os.environ.get('LOCAL_RANK', '0') == '0':
         print(len(all_test_data))
 
-    if args.use_incontext:
+    if cfg.use_incontext:
         test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token) for item in all_test_data if len(item['prefix']) > 5]
     else:
         test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
 
     test_ds_privileged = load_from_disk(f"{DATA_DIR}/wikipedia_openwebmath/test/chunk_0")
-    output_dir = args.output_dir + '/' + (wandb.run.name if os.environ.get('LOCAL_RANK', '0') == '0' else 'tmp')
+    output_dir = cfg.output_dir + '/' + (wandb.run.name if os.environ.get('LOCAL_RANK', '0') == '0' else 'tmp')
     if os.environ.get('LOCAL_RANK', '0') == '0':
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -583,21 +545,21 @@ if __name__ == "__main__":
 
     # Configure training arguments
     training_args = MySFTConfig(
-        learning_rate=args.learning_rate,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        gradient_checkpointing=args.gradient_checkpointing,
-        logging_steps=args.logging_steps,
+        learning_rate=cfg.learning_rate,
+        num_train_epochs=cfg.num_train_epochs,
+        per_device_train_batch_size=cfg.per_device_train_batch_size,
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+        gradient_checkpointing=cfg.gradient_checkpointing,
+        logging_steps=cfg.logging_steps,
         output_dir=output_dir,
-        push_to_hub=args.push_to_hub,
-        max_seq_length=args.max_seq_length,
-        packing=args.packing,
+        push_to_hub=cfg.push_to_hub,
+        max_seq_length=cfg.max_seq_length,
+        packing=cfg.packing,
         save_strategy='steps',
-        eval_strategy=args.eval_strategy,
-        eval_steps=args.eval_steps,
+        eval_strategy=cfg.eval_strategy,
+        eval_steps=cfg.eval_steps,
         save_total_limit=3,
-        save_steps=args.save_steps,   
+        save_steps=cfg.save_steps,   
         bf16=True,
     )
     
@@ -619,9 +581,9 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
-        generate_every_n_steps=args.generate_every_n_steps,
-        num_samples=args.num_samples,
-        max_new_tokens=args.max_new_tokens,
+        generate_every_n_steps=cfg.generate_every_n_steps,
+        num_samples=cfg.num_samples,
+        max_new_tokens=cfg.max_new_tokens,
         causal_llm=causal_llm
     )
 
@@ -636,7 +598,7 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         formatting_func=formatting_prompts_func_input,
-        peft_config=get_peft_config(args),
+        peft_config=get_peft_config(cfg),
         args=training_args,
         packing=False,
         callbacks=[callback] if os.environ.get('LOCAL_RANK', '0') == '0' else [],
@@ -654,4 +616,7 @@ if __name__ == "__main__":
         print(f"Number of trainable parameters: {num_trainable_params:,}")
 
     # Train model
-    trainer.train(resume_from_checkpoint=args.load_dir)
+    trainer.train(resume_from_checkpoint=cfg.load_dir)
+
+if __name__ == "__main__":
+    main()
