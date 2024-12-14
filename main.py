@@ -1,6 +1,8 @@
 import argparse
 from trl import SFTConfig, SFTTrainer
+from functools import partial
 from transformers import Trainer
+import hydra
 from peft import PeftModel
 import time
 import ipdb
@@ -62,7 +64,7 @@ def convert_item(item, rand_item=None):
     return new_item
 
 
-def convert_item_incontext(item, rand_item=None, eos_token=None, causal_llm=False):
+def convert_item_incontext(item, rand_item=None, eos_token=None, cfg=None):
     messages = []
     
     prefix = item.get('prefix', '')
@@ -76,62 +78,47 @@ def convert_item_incontext(item, rand_item=None, eos_token=None, causal_llm=Fals
         idx_of_next_sentence = model_output.find('Sentence #')
         model_output = model_output[:idx_of_next_sentence]
         
-
-    if args.prompt_version == 1:
-        prompt = prefix
-    elif args.prompt_version == 2:
-        prompt = f'Please complete the following text (in less than 200 tokens): {prefix}'
-    elif args.prompt_version == 3:
-        prompt = f'Please generate one sentence that completes the following text and do not generate any other text: {prefix}'
+    if cfg.causal_llm:
+        new_item = {
+            'source': 'GPT4LLM',
+            'prefix': prefix,
+            'model_output': model_output,
+            'sentence': sentence,
+            'old_perplexity': old_perplexity,
+            'new_perplexity': new_perplexity
+        }
     else:
-        raise NotImplementedError
-    # if causal_llm:
-    #     data = prefix + "<start_thinking>" + model_output + "<xot>" + sentence
-    #     new_item = {"text": data}
-    # else:
-    messages.append({'content': prompt, 'role': 'user'})
-    # messages.append({'content': model_output + sentence, 'role': 'assistant'})
-    messages.append({'content': model_output + eos_token, 'role': 'assistant'})
+        if cfg.prompt_version == 1:
+            prompt = prefix
+        elif cfg.prompt_version == 2:
+            prompt = f'Please complete the following text (in less than 200 tokens): {prefix}'
+        elif cfg.prompt_version == 3:
+            prompt = f'Please generate one sentence that completes the following text and do not generate any other text: {prefix}'
+        else:
+            raise NotImplementedError
 
-    num_turns = len(messages)
+        messages.append({'content': prompt, 'role': 'user'})
+        messages.append({'content': model_output + eos_token, 'role': 'assistant'})
 
-    new_item = {
-        'source': 'GPT4LLM',
-        'messages': messages,
-        'prefix': prefix,
-        'model_output': model_output,
-        'sentence': sentence,
-        'old_perplexity': old_perplexity,
-        'new_perplexity': new_perplexity
-    }
+        num_turns = len(messages)
+
+        new_item = {
+            'source': 'GPT4LLM',
+            'messages': messages,
+            'prefix': prefix,
+            'model_output': model_output,
+            'sentence': sentence,
+            'old_perplexity': old_perplexity,
+            'new_perplexity': new_perplexity
+        }
     return new_item
 
-# def convert_item_incontext(item, rand_item=None):
-#     messages = []
-#     text = item.get('text', '')
-#     model_output_sentence = item.get('model_output_sentence', '')
-#     model_output_cot = item.get('model_output_cot', '')
-#     text_index = text.find(model_output_sentence[1:-1])
-#     prefix = text[:text_index]
-#     suffix = model_output_cot + text[text_index:]
-
-#     messages.append({'content': prefix, 'role': 'user'})
-#     messages.append({'content': suffix, 'role': 'assistant'})
-
-#     num_turns = len(messages)
-
-#     new_item = {
-#         'source': 'GPT4LLM',
-#         'messages': messages,
-#     }
-#     return new_item
 
 def convert_item_hendrycks_math(item):
     messages = []
     problem = item.get('problem', '')
     model_output = item.get('model_output', '') if 'model_output' in item else None
     solution = item.get('solution', '')
-
     messages.append({'content': 'Problem: ' + problem + ' Please put your final answer in \\boxed{}.\nAnswer: ', 'role': 'user'})
 
     numerical_solution = last_boxed_only_string(solution)
@@ -277,7 +264,7 @@ def get_text_in_sentences(text):
     return numbered_sentences, len(sentences)
 
 class GenerateSamplesCallback(TrainerCallback):
-    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400, perplexity_device='cpu', causal_llm=False):
+    def __init__(self, train_dataset, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400, perplexity_device='cpu', cfg=None, start_thinking_token=None, end_thinking_token=None, eos_token=None):
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         self.tokenizer = tokenizer
@@ -286,7 +273,10 @@ class GenerateSamplesCallback(TrainerCallback):
         self.accumulated_data = []
         self.max_new_tokens = max_new_tokens
         self.perplexity_device = perplexity_device
-        self.causal_llm = causal_llm
+        self.causal_llm = cfg.causal_llm
+        self.start_thinking_token = start_thinking_token
+        self.end_thinking_token = end_thinking_token
+        self.eos_token = eos_token
 
     def on_step_begin(self, args, state, control, **kwargs):
         perplexity_device = self.perplexity_device
@@ -312,11 +302,6 @@ class GenerateSamplesCallback(TrainerCallback):
                     device=model.device,
                     do_sample=True,
                 )
-                # st()
-                
-                # generator.model = PeftModel.from_pretrained(model = model)
-
-
 
                 if len(self.train_dataset) == 1:
                     sample_indices = np.arange(1)
@@ -331,9 +316,7 @@ class GenerateSamplesCallback(TrainerCallback):
                 generated_cot_perplexities_train = []
                 gt_perplexities_test = []
                 gt_perplexities_train = []
-
-                print(model.base_model.model.model.embed_tokens.weight[-3:].sum())
-
+                
                 for idx, sample in enumerate(samples):
                     if self.causal_llm:
                         prefix = sample['prefix']
@@ -341,24 +324,23 @@ class GenerateSamplesCallback(TrainerCallback):
                         sentence = sample['sentence']
                         input_text = prefix
                         
-                        original_full_text = prefix  + "<start_thinking>" + model_output + "<end_thinking>"
+                        
+                        original_full_text = prefix  + self.start_thinking_token + model_output + self.end_thinking_token
                         original_full_text_wo_thinking = prefix
                         
                         gen_output = generator(input_text, return_tensors=True)
                         input_text_len = len(self.tokenizer(input_text)['input_ids'])
                         generated_text = self.tokenizer.decode(gen_output[0]['generated_token_ids'][input_text_len:], skip_special_tokens=False)
                         
-                        start_thinking_idx = generated_text.find('<start_thinking>')
-                        end_thinking_idx = generated_text.find('<end_thinking>')
+                        start_thinking_idx = generated_text.find(self.start_thinking_token)
+                        end_thinking_idx = generated_text.find(self.end_thinking_token)
                         
                         if start_thinking_idx != -1 and end_thinking_idx != -1:
-                            generated_text_thinking = generated_text[start_thinking_idx:end_thinking_idx + len('<end_thinking>')]
+                            generated_text_thinking = generated_text[start_thinking_idx:end_thinking_idx + len(self.end_thinking_token)]
                         else:
                             generated_text_thinking = ''
                         
                         generated_full_text = prefix + generated_text_thinking
-                        
-                        
                         input_text_vis = input_text
                     else:
                         input_text = []
@@ -372,7 +354,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         input_text_vis = input_text[0]['content']
 
                     prefix = sample['prefix']
-                    sentence = sample['sentence'] + eos_token
+                    sentence = sample['sentence'] + self.eos_token
                     model_output = sample['model_output']
                     
                     # print("\n\n", "model_output", model_output, "\n\n")
@@ -396,7 +378,6 @@ class GenerateSamplesCallback(TrainerCallback):
                     self.accumulated_data.append({
                         "global_step": state.global_step,
                         "input_text": input_text_vis,
-                        # "assistant": assistant_text,
                         "generated_output": generated_text,
                         "model_output": sample['model_output'],
                         "sentence": sample['sentence'],
@@ -418,6 +399,7 @@ class GenerateSamplesCallback(TrainerCallback):
                         data["generated_cot_perplexity"],
                         data["gt_perplexity"],
                     )
+                
                 wandb.log({
                     'Generated Samples': table,
                     'global_step': state.global_step,
@@ -435,32 +417,29 @@ class GenerateSamplesCallback(TrainerCallback):
                     scheduler.step = original_scheduler_step
 
 # Define PEFT config if enabled
-def get_peft_config(args):
-    if args.use_peft:
+def get_peft_config(cfg):
+    if cfg.tune_embeddings:
+        modules_to_save = ["embed_tokens", "lm_head"]
+    else:
+        modules_to_save = None
+    
+    if cfg.use_peft:
         from peft import LoraConfig
         peft_config = LoraConfig(
-            r=args.lora_r, 
-            lora_alpha=args.lora_alpha,
-            modules_to_save=["embed_tokens", "lm_head"],
+            r=cfg.lora_r, 
+            lora_alpha=cfg.lora_alpha,
+            modules_to_save=modules_to_save,
         )
         return peft_config
     return None
-# 'source': 'GPT4LLM',
-# 'messages': messages,
-# 'prefix': prefix,
-# 'model_output': model_output,
-# 'sentence': sentence,
-# 'old_perplexity': old_perplexity,
-# 'new_perplexity': new_perplexity
-# }
-def formatting_prompts_func(examples):
-    global eos_token
+
+def formatting_prompts_func(examples, start_thinking_token, end_thinking_token, eos_token):
     prefixes = examples["prefix"]
     model_outputs = examples["model_output"]
     sentences = examples["sentence"]
     texts = []
     for prefix, model_output, sentence in zip(prefixes, model_outputs, sentences):
-        text = prefix + '<start_thinking>' + model_output + '<end_thinking>' + sentence + eos_token
+        text = prefix + start_thinking_token + model_output + end_thinking_token + sentence + eos_token
         texts.append(str(text))
     return texts
 
@@ -468,13 +447,12 @@ def formatting_prompts_func(examples):
 @hydra.main(config_path="configs", config_name="config")
 def main(cfg):
     # Parse arguments
-    print(cfg)
-    print("save steps", cfg.save_steps)
+    print("cfg", cfg)
     print("Ranks:", os.environ.get('LOCAL_RANK'))
-
+    
     # Initialize wandb
     if os.environ.get('LOCAL_RANK', '0') == '0':
-        wandb.init(project="openwebmath-sft6", config=cfg)
+        wandb.init(project="openwebmath-sft6", config=dict(cfg))
 
     # Load training data
     if cfg.use_incontext:
@@ -499,15 +477,29 @@ def main(cfg):
         
     device = "cuda:0"
     model.to(device)
+    
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<start_thinking>','<end_thinking>']})
+    start_thinking_token = None
+    end_thinking_token = None
+    
+    if cfg.use_special_tokens:
+        if cfg.use_existing:
+            start_thinking_token = '<|reserved_special_token_3|>'
+            end_thinking_token = '<|reserved_special_token_4|>'
+        else:
+            start_thinking_token = '<start_thinking>'
+            end_thinking_token = '<end_thinking>'
+            tokenizer.add_special_tokens({'additional_special_tokens': [start_thinking_token, end_thinking_token]})
+    
     model.resize_token_embeddings(len(tokenizer))
+    
+    
     model.config.pad_token_id = tokenizer.pad_token_id
     eos_token = tokenizer.eos_token
     causal_llm = cfg.causal_llm
-
+    
     if cfg.use_incontext:
-        train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, causal_llm=False) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
+        train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
     else:
         if cfg.rand_train:
             train_data_transformed = [convert_item(item, rand_item=all_train_data[np.random.randint(len(all_train_data))]) for i, item in enumerate(all_train_data)]
@@ -522,11 +514,12 @@ def main(cfg):
     # Load test data
     with open(f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_test/chunk_0_elements_0_50000_filtered.json", 'r') as f:
         all_test_data = json.load(f)
+    
     if os.environ.get('LOCAL_RANK', '0') == '0':
         print(len(all_test_data))
 
     if cfg.use_incontext:
-        test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token) for item in all_test_data if len(item['prefix']) > 5]
+        test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for item in all_test_data if len(item['prefix']) > 5]
     else:
         test_data_transformed = [convert_item(item) for item in all_test_data]
     test_dataset = Dataset.from_list(test_data_transformed)
@@ -538,13 +531,13 @@ def main(cfg):
             os.makedirs(output_dir)
 
     # Define a custom SFTConfig class to override n_gpu
-    class MySFTConfig(SFTConfig): # to prevent it from doing dataparallel even though multiple gpus are available
-        @property
-        def n_gpu(self):
-            return 1
+    # class MySFTConfig(SFTConfig): # to prevent it from doing dataparallel even though multiple gpus are available
+    #     @property
+    #     def n_gpu(self):
+    #         return 1
 
     # Configure training arguments
-    training_args = MySFTConfig(
+    training_args = SFTConfig(
         learning_rate=cfg.learning_rate,
         num_train_epochs=cfg.num_train_epochs,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
@@ -558,7 +551,7 @@ def main(cfg):
         save_strategy='steps',
         eval_strategy=cfg.eval_strategy,
         eval_steps=cfg.eval_steps,
-        save_total_limit=3,
+        save_total_limit=cfg.save_total_limit,
         save_steps=cfg.save_steps,   
         bf16=True,
     )
@@ -584,11 +577,14 @@ def main(cfg):
         generate_every_n_steps=cfg.generate_every_n_steps,
         num_samples=cfg.num_samples,
         max_new_tokens=cfg.max_new_tokens,
-        causal_llm=causal_llm
+        cfg=cfg,
+        start_thinking_token=start_thinking_token,
+        end_thinking_token=end_thinking_token,
+        eos_token=eos_token,
     )
 
     if causal_llm:
-        formatting_prompts_func_input = formatting_prompts_func
+        formatting_prompts_func_input = partial(formatting_prompts_func, start_thinking_token=start_thinking_token, end_thinking_token=end_thinking_token, eos_token=eos_token)
     else:
         formatting_prompts_func_input = None
     
@@ -608,7 +604,6 @@ def main(cfg):
     
     if os.environ.get('LOCAL_RANK', '0') == '0':
         num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
         # Calculate number of trainable parameters
         parameter_names = [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad and 'lora' not in n]
         print("parameter_names without lora", parameter_names)
