@@ -280,7 +280,6 @@ class GenerateSamplesCallback(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         perplexity_device = self.perplexity_device
-        # st()
         with torch.no_grad():
             model = kwargs['model']
             optimizer = kwargs.get('optimizer')
@@ -610,8 +609,15 @@ def main(cfg):
         
         print(f"Number of trainable parameters: {num_trainable_params:,}")
 
+    if cfg.load_exp is not None:
+        load_base = "/".join(CKPT_DIR.split('/')[:-1])
+        load_dir = f"{load_base}/saved/{cfg.load_exp}"
+        assert os.path.exists(load_dir), f"Checkpoint directory {load_dir} does not exist"
+        print("Loading from", load_dir)
+    else:
+        load_dir = None
     # Train model
-    trainer.train(resume_from_checkpoint=cfg.load_dir)
+    trainer.train(resume_from_checkpoint=load_dir)
 
 if __name__ == "__main__":
     main()
