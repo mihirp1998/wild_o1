@@ -6,3 +6,5 @@ __pycache__/
 slurm_logs/
 *.pdf
 outputs/
+multirun/
+slurm_out/

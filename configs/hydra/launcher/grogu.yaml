@@ -1,0 +1,16 @@
+defaults:
+  - submitit_slurm
+
+signal_delay_s: 120
+timeout_min: 360
+partition: deepaklong,all
+gres: gpu:1
+cpus_per_task: 8
+mem_gb: 30
+nodes: 1
+constraint: A6000
+max_num_timeout: 100
+
+# additional_parameters: {'nodelist':'grogu-0-24'}
+submitit_folder: slurm_out
+name: genrl

@@ -1,0 +1,17 @@
+defaults:
+  - submitit_slurm
+
+signal_delay_s: 120
+timeout_min: 1440
+partition: kate_reserved
+gres: gpu:1
+cpus_per_task: 12
+mem_gb: 60
+nodes: 1
+# ntasks: 1
+# constraint: A5000|rtx6000|rtx2080ti
+max_num_timeout: 100
+
+# additional_parameters: {'nodelist':'matrix-0-16,matrix-1-22','ntasks':'1'}
+submitit_folder: out_slurm
+name: complex

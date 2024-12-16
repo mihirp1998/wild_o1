@@ -558,7 +558,8 @@ def main(cfg):
         ddp_find_unused_parameters=False,
         max_seq_length=cfg.max_seq_length,
         packing=cfg.packing,
-        save_strategy='steps',
+        save_strategy=cfg.save_strategy,
+        metric_for_best_model='eval_loss',
         eval_strategy=cfg.eval_strategy,
         eval_steps=cfg.eval_steps,
         save_total_limit=cfg.save_total_limit,
@@ -609,7 +610,6 @@ def main(cfg):
         formatting_func=formatting_prompts_func_input,
         peft_config=get_peft_config(cfg),
         args=training_args,
-        # packing=False,
         callbacks=[callback] if os.environ.get('LOCAL_RANK', '0') == '0' else [],
     )
     trainer.can_return_loss = True
