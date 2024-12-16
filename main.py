@@ -166,94 +166,98 @@ def get_perplexity(prefix, sentence, model, tokenizer):
 
     return perplexity
 
-class HendrycksMathGenerateSamplesCallback(TrainerCallback):
-    def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
-        self.test_dataset = test_dataset
-        self.tokenizer = tokenizer
-        self.generate_every_n_steps = generate_every_n_steps
-        self.num_samples = num_samples
-        self.accumulated_data = []
-        self.max_new_tokens = max_new_tokens
+# class HendrycksMathGenerateSamplesCallback(TrainerCallback):
+#     def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
+#         self.test_dataset = test_dataset
+#         self.tokenizer = tokenizer
+#         self.generate_every_n_steps = generate_every_n_steps
+#         self.num_samples = num_samples
+#         self.accumulated_data = []
+#         self.max_new_tokens = max_new_tokens
 
-    def on_step_begin(self, args, state, control, **kwargs):
-        with torch.no_grad():
-            model = kwargs['model']
-            optimizer = kwargs.get('optimizer')
-            scheduler = kwargs.get('lr_scheduler')
-            tokenizer = self.tokenizer
-            if state.global_step % self.generate_every_n_steps == 0:
-                if optimizer and scheduler:
-                    optimizer_state = optimizer.state_dict()
-                    scheduler_state = scheduler.state_dict()
-                    original_scheduler_step = scheduler.step
-                model.eval()
-                generator = transformers.pipeline(
-                    "text-generation",
-                    model=model,
-                    tokenizer=tokenizer,
-                    pad_token_id=tokenizer.eos_token_id,
-                    max_new_tokens=self.max_new_tokens,
-                    device=device
-                )
-                sample_indices = np.arange(self.num_samples)
-                samples = self.test_dataset.select(sample_indices)
 
-                test_correct = 0
-                test_total = 0
+#     def on_step_begin(self, args, state, control, **kwargs):
+#         if False:
+#             return
+#         else:
+#             with torch.no_grad():
+#                 model = kwargs['model']
+#                 optimizer = kwargs.get('optimizer')
+#                 scheduler = kwargs.get('lr_scheduler')
+#                 tokenizer = self.tokenizer
+#                 if state.global_step % self.generate_every_n_steps == 0:
+#                     if optimizer and scheduler:
+#                         optimizer_state = optimizer.state_dict()
+#                         scheduler_state = scheduler.state_dict()
+#                         original_scheduler_step = scheduler.step
+#                     model.eval()
+#                     generator = transformers.pipeline(
+#                         "text-generation",
+#                         model=model,
+#                         tokenizer=tokenizer,
+#                         pad_token_id=tokenizer.eos_token_id,
+#                         max_new_tokens=self.max_new_tokens,
+#                         device=device
+#                     )
+#                     sample_indices = np.arange(self.num_samples)
+#                     samples = self.test_dataset.select(sample_indices)
 
-                for idx, sample in enumerate(samples):
-                    input_text = []
-                    assistant_text = ''
-                    for message in sample['messages']:
-                        if message['role'] == 'user':
-                            input_text.append(message)
-                        elif message['role'] == 'assistant':
-                            assistant_text += message['content']
+#                     test_correct = 0
+#                     test_total = 0
 
-                    generated_text = generator(input_text)[0]['generated_text'][-1]['content']
-                    ground_truth_solution = sample.get('solution', '')
+#                     for idx, sample in enumerate(samples):
+#                         input_text = []
+#                         assistant_text = ''
+#                         for message in sample['messages']:
+#                             if message['role'] == 'user':
+#                                 input_text.append(message)
+#                             elif message['role'] == 'assistant':
+#                                 assistant_text += message['content']
 
-                    # Extract answers and check correctness
-                    generated_answer = remove_boxed(last_boxed_only_string(generated_text))
-                    ground_truth_answer = remove_boxed(last_boxed_only_string(ground_truth_solution))
-                    # print(generated_answer, ground_truth_answer)
+#                         generated_text = generator(input_text)[0]['generated_text'][-1]['content']
+#                         ground_truth_solution = sample.get('solution', '')
 
-                    test_total += 1
-                    if generated_answer == ground_truth_answer:
-                        test_correct += 1
+#                         # Extract answers and check correctness
+#                         generated_answer = remove_boxed(last_boxed_only_string(generated_text))
+#                         ground_truth_answer = remove_boxed(last_boxed_only_string(ground_truth_solution))
+#                         # print(generated_answer, ground_truth_answer)
 
-                    # Log individual samples for inspection
-                    self.accumulated_data.append({
-                        "global_step": state.global_step,
-                        "input_text": input_text[0]['content'],
-                        "assistant": assistant_text,
-                        "ground_truth_solution": ground_truth_solution,
-                        "generated_output": generated_text
-                    })
+#                         test_total += 1
+#                         if generated_answer == ground_truth_answer:
+#                             test_correct += 1
 
-                # Calculate accuracy
-                test_accuracy = test_correct / test_total if test_total > 0 else 0
+#                         # Log individual samples for inspection
+#                         self.accumulated_data.append({
+#                             "global_step": state.global_step,
+#                             "input_text": input_text[0]['content'],
+#                             "assistant": assistant_text,
+#                             "ground_truth_solution": ground_truth_solution,
+#                             "generated_output": generated_text
+#                         })
 
-                # Log generated samples and accuracies to wandb
-                table = wandb.Table(columns=["global_step", "input_text", "assistant", "ground_truth_solution", "generated_output"])
-                for data in self.accumulated_data:
-                    table.add_data(
-                        data["global_step"],
-                        data["input_text"],
-                        data["assistant"],
-                        data["ground_truth_solution"],
-                        data["generated_output"]
-                    )
-                wandb.log({
-                    'Generated Samples Hendrycks Math': table,
-                    'test_accuracy_hendrycks_math': test_accuracy,
-                    'global_step': state.global_step
-                })
-                model.train()
-                if optimizer and scheduler:
-                    optimizer.load_state_dict(optimizer_state)
-                    scheduler.load_state_dict(scheduler_state)
-                    scheduler.step = original_scheduler_step
+#                     # Calculate accuracy
+#                     test_accuracy = test_correct / test_total if test_total > 0 else 0
+
+#                     # Log generated samples and accuracies to wandb
+#                     table = wandb.Table(columns=["global_step", "input_text", "assistant", "ground_truth_solution", "generated_output"])
+#                     for data in self.accumulated_data:
+#                         table.add_data(
+#                             data["global_step"],
+#                             data["input_text"],
+#                             data["assistant"],
+#                             data["ground_truth_solution"],
+#                             data["generated_output"]
+#                         )
+#                     wandb.log({
+#                         'Generated Samples Hendrycks Math': table,
+#                         'test_accuracy_hendrycks_math': test_accuracy,
+#                         'global_step': state.global_step
+#                     })
+#                     model.train()
+#                     if optimizer and scheduler:
+#                         optimizer.load_state_dict(optimizer_state)
+#                         scheduler.load_state_dict(scheduler_state)
+#                         scheduler.step = original_scheduler_step
 
 def get_text_in_sentences(text):
     # Split on period, exclamation mark, question mark, or newline, followed by optional whitespace
@@ -277,7 +281,15 @@ class GenerateSamplesCallback(TrainerCallback):
         self.start_thinking_token = start_thinking_token
         self.end_thinking_token = end_thinking_token
         self.eos_token = eos_token
-
+        self.cfg = cfg
+    
+    def on_train_begin(self, args, state, control, **kwargs):
+        if self.cfg.tune_only_lora:
+            for name, param in kwargs['model'].named_parameters():
+                if 'lora' not in name and param.requires_grad:
+                    param.requires_grad = False            
+        
+        
     def on_step_begin(self, args, state, control, **kwargs):
         perplexity_device = self.perplexity_device
         with torch.no_grad():
@@ -285,12 +297,12 @@ class GenerateSamplesCallback(TrainerCallback):
             optimizer = kwargs.get('optimizer')
             scheduler = kwargs.get('lr_scheduler')
             tokenizer = self.tokenizer
-            if state.global_step % self.generate_every_n_steps == 0:
+            if state.global_step % self.generate_every_n_steps == 0 and (not self.cfg.skip_first_step or state.global_step > 0):
                 
-                if optimizer and scheduler:
-                    optimizer_state = optimizer.state_dict()
-                    scheduler_state = scheduler.state_dict()
-                    original_scheduler_step = scheduler.step
+                # if optimizer and scheduler:
+                #     optimizer_state = optimizer.state_dict()
+                #     scheduler_state = scheduler.state_dict()
+                #     original_scheduler_step = scheduler.step
                 model.eval()
                 generator = transformers.pipeline(
                     "text-generation",
@@ -410,18 +422,17 @@ class GenerateSamplesCallback(TrainerCallback):
                     'gt_perplexity_train': sum(gt_perplexities_train) / len(gt_perplexities_train),
                 })
                 model.train()
-                if optimizer and scheduler:
-                    optimizer.load_state_dict(optimizer_state)
-                    scheduler.load_state_dict(scheduler_state)
-                    scheduler.step = original_scheduler_step
+                # if optimizer and scheduler:
+                #     optimizer.load_state_dict(optimizer_state)
+                #     scheduler.load_state_dict(scheduler_state)
+                #     scheduler.step = original_scheduler_step
 
 # Define PEFT config if enabled
 def get_peft_config(cfg):
-    if cfg.tune_embeddings:
-        modules_to_save = ["embed_tokens", "lm_head"]
+    if cfg.tune_special_tokens:
+        modules_to_save = ["special_tokens", "lm_head_special"]
     else:
         modules_to_save = None
-    
     if cfg.use_peft:
         from peft import LoraConfig
         peft_config = LoraConfig(
@@ -438,7 +449,10 @@ def formatting_prompts_func(examples, start_thinking_token, end_thinking_token, 
     sentences = examples["sentence"]
     texts = []
     for prefix, model_output, sentence in zip(prefixes, model_outputs, sentences):
-        text = prefix + start_thinking_token + model_output + end_thinking_token + sentence + eos_token
+        if start_thinking_token is not None and end_thinking_token is not None:
+            text = prefix + start_thinking_token + model_output + end_thinking_token + sentence + eos_token
+        else:
+            text = prefix + model_output + sentence + eos_token
         texts.append(str(text))
     return texts
 
@@ -472,7 +486,7 @@ def main(cfg):
     model_name = cfg.model_name
     tokenizer = AutoTokenizer.from_pretrained(model_name)
         
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, cfg=cfg)
         
     device = "cuda:0"
     model.to(device)
@@ -529,12 +543,6 @@ def main(cfg):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-    # Define a custom SFTConfig class to override n_gpu
-    # class MySFTConfig(SFTConfig): # to prevent it from doing dataparallel even though multiple gpus are available
-    #     @property
-    #     def n_gpu(self):
-    #         return 1
-
     # Configure training arguments
     training_args = SFTConfig(
         learning_rate=cfg.learning_rate,
@@ -542,9 +550,12 @@ def main(cfg):
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         gradient_checkpointing=cfg.gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=cfg.logging_steps,
+        logging_first_step=True,
         output_dir=output_dir,
         push_to_hub=cfg.push_to_hub,
+        ddp_find_unused_parameters=False,
         max_seq_length=cfg.max_seq_length,
         packing=cfg.packing,
         save_strategy='steps',
@@ -552,21 +563,23 @@ def main(cfg):
         eval_steps=cfg.eval_steps,
         save_total_limit=cfg.save_total_limit,
         save_steps=cfg.save_steps,   
+        eval_on_start=not cfg.skip_first_step,
         bf16=True,
+        optim="adamw_torch_fused",  # Use fused optimizer
     )
     
     start_time = time.time()
     
     # Load Hendrycks Math test data
-    test_directory = f"{DATA_DIR}/MATH/MATH/test/prealgebra"
-    test_data = []
-    for filename in os.listdir(test_directory):
-        if filename.endswith(".json"):
-            file_path = os.path.join(test_directory, filename)
-            with open(file_path, 'r') as f:
-                test_data.append(json.load(f))
-    if os.environ.get('LOCAL_RANK', '0') == '0':
-        print(f"Time taken to load Hendrycks Math test data: {time.time() - start_time} seconds")
+    # test_directory = f"{DATA_DIR}/MATH/MATH/test/prealgebra"
+    # test_data = []
+    # for filename in os.listdir(test_directory):
+    #     if filename.endswith(".json"):
+    #         file_path = os.path.join(test_directory, filename)
+    #         with open(file_path, 'r') as f:
+    #             test_data.append(json.load(f))
+    # if os.environ.get('LOCAL_RANK', '0') == '0':
+    #     print(f"Time taken to load Hendrycks Math test data: {time.time() - start_time} seconds")
 
     # Initialize callbacks
     callback = GenerateSamplesCallback(
@@ -586,27 +599,25 @@ def main(cfg):
         formatting_prompts_func_input = partial(formatting_prompts_func, start_thinking_token=start_thinking_token, end_thinking_token=end_thinking_token, eos_token=eos_token)
     else:
         formatting_prompts_func_input = None
-    
+
     trainer = SFTTrainer(
         model=model,
+        cfg=cfg,
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         formatting_func=formatting_prompts_func_input,
         peft_config=get_peft_config(cfg),
         args=training_args,
-        packing=False,
+        # packing=False,
         callbacks=[callback] if os.environ.get('LOCAL_RANK', '0') == '0' else [],
     )
     trainer.can_return_loss = True
-    model.can_return_loss = True
-    
+
     if os.environ.get('LOCAL_RANK', '0') == '0':
         num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        # Calculate number of trainable parameters
         parameter_names = [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad and 'lora' not in n]
         print("parameter_names without lora", parameter_names)
-        
         print(f"Number of trainable parameters: {num_trainable_params:,}")
 
     if cfg.load_exp is not None:

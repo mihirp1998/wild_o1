@@ -8,7 +8,7 @@ gradient_checkpointing: true
 logging_steps: 25
 save_steps: 2500
 packing: false
-save_total_limit: 3
+save_total_limit: 1
 model_name: "meta-llama/Llama-3.1-8B"
 output_dir: "${oc.env:CKPT_DIR}"
 load_exp: null
@@ -27,8 +27,10 @@ prompt_version: 3
 perplexity_device: 1
 debug_with_single_example: false
 eval_steps: 500
-tune_embeddings: true
-
+tune_special_tokens: true
+tune_only_lora: false
+skip_first_step: false
+num_special_tokens: 2
 # PEFT arguments
 use_incontext: true
 use_peft: true
