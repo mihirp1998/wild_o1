@@ -1,4 +1,8 @@
 # Training and evaluation arguments
+defaults:
+  - _self_
+  - /exps: []
+
 causal_llm: true
 learning_rate: 2.0e-3
 num_train_epochs: 2000
@@ -19,19 +23,26 @@ eval_strategy: "steps"
 push_to_hub: false
 rand_train: false
 use_n_shot_prompt: 0
-max_new_tokens: 400
+max_new_tokens: 1024
 num_samples: 20
 generate_every_n_steps: 500
 max_seq_length: 1024
 weight_decay: 0.0
 prompt_version: 3
 perplexity_device: 1
-debug_with_single_example: false
+debug: false
 eval_steps: 500
 tune_special_tokens: true
 tune_only_lora: false
 skip_first_step: false
 num_special_tokens: 2
+dataset_name: filtered_openwebmath
+dataset_type: pretrain
+generate_samples: false
+resume: false
+data_version: v5
+running: false
+
 # PEFT arguments
 use_incontext: true
 use_peft: true

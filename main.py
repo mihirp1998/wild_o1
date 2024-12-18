@@ -17,7 +17,7 @@ import os
 import torch
 import math
 import os 
-from util import clean_numbers, last_boxed_only, last_boxed_only_string
+from util import clean_numbers, last_boxed_only, last_boxed_only_string, remove_boxed
 import re
 
 DATA_DIR = os.environ['DATA_DIR']
@@ -28,14 +28,7 @@ else:
     CKPT_DIR = None
 
 
-def remove_boxed(s):
-    left = "\\boxed{"
-    try:
-        assert s[:len(left)] == left
-        assert s[-1] == "}"
-        return s[len(left):-1]
-    except:
-        return None
+
 
 def convert_item(item, rand_item=None):
     messages = []
@@ -74,7 +67,6 @@ def convert_item_incontext(item, rand_item=None, eos_token=None, cfg=None):
     new_perplexity = item.get('new_perplexity', '')
 
     if 'Sentence #' in model_output: # TODO fix this in dataset generation
-        assert False
         idx_of_next_sentence = model_output.find('Sentence #')
         model_output = model_output[:idx_of_next_sentence]
         
@@ -114,26 +106,41 @@ def convert_item_incontext(item, rand_item=None, eos_token=None, cfg=None):
     return new_item
 
 
-def convert_item_hendrycks_math(item):
+def convert_item_hendrycks_math(item, cfg=None):
     messages = []
     problem = item.get('problem', '')
     model_output = item.get('model_output', '') if 'model_output' in item else None
     solution = item.get('solution', '')
-    messages.append({'content': 'Problem: ' + problem + ' Please put your final answer in \\boxed{}.\nAnswer: ', 'role': 'user'})
+    
+    if cfg.causal_llm:
+        final_answer = last_boxed_only_string(solution)
+        if final_answer is None:
+            st()
+        cot_idx = solution.find(final_answer)
+        cot = solution[:cot_idx]
+        new_item = {
+            'source': 'GPT4LLM',
+            'problem': problem,
+            'cot': cot,
+            'final_answer': final_answer,
+        }        
+        return new_item
+    else:
+        messages.append({'content': 'Problem: ' + problem + ' Please put your final answer in \\boxed{}.\nAnswer: ', 'role': 'user'})
 
-    numerical_solution = last_boxed_only_string(solution)
-    if model_output is not None:
-        messages.append({'content': model_output + f'\nThe answer is {numerical_solution}' , 'role': 'assistant'})
+        numerical_solution = last_boxed_only_string(solution)
+        if model_output is not None:
+            messages.append({'content': model_output + f'\nThe answer is {numerical_solution}' , 'role': 'assistant'})
 
-    num_turns = len(messages)
+        num_turns = len(messages)
 
-    new_item = {
-        'source': 'GPT4LLM',
-        'messages': messages,
-        'num_turns': num_turns,
-        'solution': solution
-    }
-    return new_item
+        new_item = {
+            'source': 'GPT4LLM',
+            'messages': messages,
+            'num_turns': num_turns,
+            'solution': solution
+        }
+        return new_item
 
 def get_log_probs(tokens, model):
     with torch.no_grad():
@@ -166,98 +173,115 @@ def get_perplexity(prefix, sentence, model, tokenizer):
 
     return perplexity
 
-# class HendrycksMathGenerateSamplesCallback(TrainerCallback):
-#     def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400):
-#         self.test_dataset = test_dataset
-#         self.tokenizer = tokenizer
-#         self.generate_every_n_steps = generate_every_n_steps
-#         self.num_samples = num_samples
-#         self.accumulated_data = []
-#         self.max_new_tokens = max_new_tokens
+class HendrycksMathGenerateSamplesCallback(TrainerCallback):
+    def __init__(self, test_dataset, tokenizer, generate_every_n_steps=100, num_samples=5, max_new_tokens=400, cfg=None):
+        self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
+        self.generate_every_n_steps = generate_every_n_steps
+        self.num_samples = num_samples
+        self.accumulated_data = []
+        self.max_new_tokens = max_new_tokens
+        self.cfg = cfg
 
 
-#     def on_step_begin(self, args, state, control, **kwargs):
-#         if False:
-#             return
-#         else:
-#             with torch.no_grad():
-#                 model = kwargs['model']
-#                 optimizer = kwargs.get('optimizer')
-#                 scheduler = kwargs.get('lr_scheduler')
-#                 tokenizer = self.tokenizer
-#                 if state.global_step % self.generate_every_n_steps == 0:
-#                     if optimizer and scheduler:
-#                         optimizer_state = optimizer.state_dict()
-#                         scheduler_state = scheduler.state_dict()
-#                         original_scheduler_step = scheduler.step
-#                     model.eval()
-#                     generator = transformers.pipeline(
-#                         "text-generation",
-#                         model=model,
-#                         tokenizer=tokenizer,
-#                         pad_token_id=tokenizer.eos_token_id,
-#                         max_new_tokens=self.max_new_tokens,
-#                         device=device
-#                     )
-#                     sample_indices = np.arange(self.num_samples)
-#                     samples = self.test_dataset.select(sample_indices)
+    def on_step_begin(self, args, state, control, **kwargs):
+        with torch.no_grad():
+            model = kwargs['model']
+            tokenizer = self.tokenizer
+            if state.global_step % self.generate_every_n_steps == 0:
+                model.eval()
+                generator = transformers.pipeline(
+                    "text-generation",
+                    model=model,
+                    tokenizer=tokenizer,
+                    pad_token_id=tokenizer.eos_token_id,
+                    max_new_tokens=self.max_new_tokens,
+                    device=model.device,
+                    do_sample=True,
+                )
+                
+                
+                if len(self.test_dataset) < self.num_samples:
+                    sample_indices = np.arange(len(self.test_dataset))
+                else:
+                    sample_indices = np.arange(self.num_samples)
+                samples = self.test_dataset.select(sample_indices)
 
-#                     test_correct = 0
-#                     test_total = 0
+                test_correct = 0
+                test_total = 0
 
-#                     for idx, sample in enumerate(samples):
-#                         input_text = []
-#                         assistant_text = ''
-#                         for message in sample['messages']:
-#                             if message['role'] == 'user':
-#                                 input_text.append(message)
-#                             elif message['role'] == 'assistant':
-#                                 assistant_text += message['content']
+                for idx, sample in enumerate(samples):
+                    if self.cfg.causal_llm:
+                        prefix = sample['problem']
+                        cot = sample['cot']
+                        suffix = sample['final_answer']
+                        input_text = "Question: " + prefix
+                        
+                        generated_text = generator(input_text)[0]['generated_text']
+                        answer_idx = generated_text.find("Answer: ")
+                        
+                        if answer_idx != -1:
+                            generated_answer = generated_text[answer_idx + len("Answer: "):]
+                        else:
+                            generated_answer = ''                        
+                        
+                        ground_truth_solution = suffix
+                        input_text_vis = input_text
+                    else:                    
+                        input_text = []
+                        assistant_text = ''
+                        for message in sample['messages']:
+                            if message['role'] == 'user':
+                                input_text.append(message)
+                            elif message['role'] == 'assistant':
+                                assistant_text += message['content']
 
-#                         generated_text = generator(input_text)[0]['generated_text'][-1]['content']
-#                         ground_truth_solution = sample.get('solution', '')
+                        generated_text = generator(input_text)[0]['generated_text'][-1]['content']
+                        ground_truth_solution = sample.get('solution', '')
+                        input_text_vis = input_text[0]['content']
+                    
+                    # Extract answers and check correctness
+                    boxed_answer = last_boxed_only_string(generated_text)
+                    if boxed_answer is None:
+                        generated_answer = ''
+                    else:
+                        generated_answer = remove_boxed(boxed_answer)
+                    
+                    ground_truth_answer = remove_boxed(last_boxed_only_string(ground_truth_solution))
+                    # print(generated_answer, ground_truth_answer)
 
-#                         # Extract answers and check correctness
-#                         generated_answer = remove_boxed(last_boxed_only_string(generated_text))
-#                         ground_truth_answer = remove_boxed(last_boxed_only_string(ground_truth_solution))
-#                         # print(generated_answer, ground_truth_answer)
+                    test_total += 1
+                    if generated_answer == ground_truth_answer:
+                        test_correct += 1
 
-#                         test_total += 1
-#                         if generated_answer == ground_truth_answer:
-#                             test_correct += 1
+                    # Log individual samples for inspection
+                    self.accumulated_data.append({
+                        "global_step": state.global_step,
+                        "input_text": input_text_vis,
+                        'generated_answer': generated_answer,
+                        "ground_truth_solution": ground_truth_solution,
+                        "generated_output": generated_text
+                    })
 
-#                         # Log individual samples for inspection
-#                         self.accumulated_data.append({
-#                             "global_step": state.global_step,
-#                             "input_text": input_text[0]['content'],
-#                             "assistant": assistant_text,
-#                             "ground_truth_solution": ground_truth_solution,
-#                             "generated_output": generated_text
-#                         })
+                # Calculate accuracy
+                test_accuracy = test_correct / test_total if test_total > 0 else 0
 
-#                     # Calculate accuracy
-#                     test_accuracy = test_correct / test_total if test_total > 0 else 0
-
-#                     # Log generated samples and accuracies to wandb
-#                     table = wandb.Table(columns=["global_step", "input_text", "assistant", "ground_truth_solution", "generated_output"])
-#                     for data in self.accumulated_data:
-#                         table.add_data(
-#                             data["global_step"],
-#                             data["input_text"],
-#                             data["assistant"],
-#                             data["ground_truth_solution"],
-#                             data["generated_output"]
-#                         )
-#                     wandb.log({
-#                         'Generated Samples Hendrycks Math': table,
-#                         'test_accuracy_hendrycks_math': test_accuracy,
-#                         'global_step': state.global_step
-#                     })
-#                     model.train()
-#                     if optimizer and scheduler:
-#                         optimizer.load_state_dict(optimizer_state)
-#                         scheduler.load_state_dict(scheduler_state)
-#                         scheduler.step = original_scheduler_step
+                # Log generated samples and accuracies to wandb
+                table = wandb.Table(columns=["global_step", "input_text", "generated_answer", "ground_truth_solution", "generated_output"])
+                for data in self.accumulated_data:
+                    table.add_data(
+                        data["global_step"],
+                        data["input_text"],
+                        data["generated_answer"],
+                        data["ground_truth_solution"],
+                        data["generated_output"]
+                    )
+                wandb.log({
+                    'Generated Samples Hendrycks Math': table,
+                    'test_accuracy_hendrycks_math': test_accuracy,
+                    'global_step': state.global_step
+                })
+                model.train()
 
 def get_text_in_sentences(text):
     # Split on period, exclamation mark, question mark, or newline, followed by optional whitespace
@@ -294,11 +318,8 @@ class GenerateSamplesCallback(TrainerCallback):
         perplexity_device = self.perplexity_device
         with torch.no_grad():
             model = kwargs['model']
-            optimizer = kwargs.get('optimizer')
-            scheduler = kwargs.get('lr_scheduler')
             tokenizer = self.tokenizer
             if state.global_step % self.generate_every_n_steps == 0 and (not self.cfg.skip_first_step or state.global_step > 0):
-                
                 # if optimizer and scheduler:
                 #     optimizer_state = optimizer.state_dict()
                 #     scheduler_state = scheduler.state_dict()
@@ -443,16 +464,21 @@ def get_peft_config(cfg):
         return peft_config
     return None
 
-def formatting_prompts_func(examples, start_thinking_token, end_thinking_token, eos_token):
-    prefixes = examples["prefix"]
-    model_outputs = examples["model_output"]
-    sentences = examples["sentence"]
+def formatting_prompts_func(examples, start_thinking_token, end_thinking_token, eos_token, cfg, tokenizer):
+    if cfg.dataset_type == "sft":
+        prefixes = examples["problem"]
+        cots = examples["cot"]
+        suffixes = examples["final_answer"]
+    elif cfg.dataset_type == "pretrain":
+        prefixes = examples["prefix"]
+        cots = examples["model_output"]
+        suffixes = examples["sentence"]
     texts = []
-    for prefix, model_output, sentence in zip(prefixes, model_outputs, sentences):
+    for prefix, cot, suffix in zip(prefixes, cots, suffixes):
         if start_thinking_token is not None and end_thinking_token is not None:
-            text = prefix + start_thinking_token + model_output + end_thinking_token + sentence + eos_token
+            text = "Question: " + prefix + start_thinking_token + cot + end_thinking_token + "Answer: " + suffix + eos_token
         else:
-            text = prefix + model_output + sentence + eos_token
+            text = "Question: " + prefix + cot + "Answer: " + suffix + eos_token
         texts.append(str(text))
     return texts
 
@@ -463,33 +489,27 @@ def main(cfg):
     print("cfg", cfg)
     print("Ranks:", os.environ.get('LOCAL_RANK'))
     
+    if cfg.load_exp is not None:
+        load_base = "/".join(CKPT_DIR.split('/')[:-1])
+        if cfg.running:
+            load_dir = f"{load_base}/running/{cfg.load_exp}"
+        else:
+            load_dir = f"{load_base}/saved/{cfg.load_exp}"
+        assert os.path.exists(load_dir), f"Checkpoint directory {load_dir} does not exist"
+        print("Loading from", load_dir)
+    else:
+        load_dir = None
+    # st()
     # Initialize wandb
     if os.environ.get('LOCAL_RANK', '0') == '0':
         wandb.init(project="openwebmath-sft6", config=dict(cfg))
 
-    # Load training data
-    if cfg.use_incontext:
-        all_train_data = []
-        train_dir = f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_train"
-        for filename in os.listdir(train_dir):
-            if filename.endswith('.json'):
-                with open(os.path.join(train_dir, filename), 'r') as f:
-                    data = json.load(f)
-                    all_train_data.extend(data)
-    else:
-        with open(f"{DATA_DIR}/wikipedia_openwebmath/sft_train/chunk_0.json", 'r') as f:
-            all_train_data = json.load(f)
-    if os.environ.get('LOCAL_RANK', '0') == '0':
-        print(len(all_train_data))
 
     # Load tokenizer and model
     model_name = cfg.model_name
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-        
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, cfg=cfg)
-        
-    device = "cuda:0"
-    model.to(device)
+    
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16, cfg=cfg)        
     
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     start_thinking_token = None
@@ -507,37 +527,51 @@ def main(cfg):
     model.resize_token_embeddings(len(tokenizer))
     
     
+    if load_dir is not None:
+        if cfg.resume:
+            pass
+        else:
+            model = PeftModel.from_pretrained(model,load_dir)
+            load_dir = None
+    
     model.config.pad_token_id = tokenizer.pad_token_id
     eos_token = tokenizer.eos_token
-    causal_llm = cfg.causal_llm
     
-    if cfg.use_incontext:
-        train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
-    else:
-        if cfg.rand_train:
-            train_data_transformed = [convert_item(item, rand_item=all_train_data[np.random.randint(len(all_train_data))]) for i, item in enumerate(all_train_data)]
-        else:
-            train_data_transformed = [convert_item(item) for item in all_train_data]
+    
 
-    if cfg.debug_with_single_example:
+    train_file = f"{DATA_DIR}/{cfg.dataset_name}/{cfg.data_version}/train.json"
+    with open(train_file, 'r') as f:
+        all_train_data = json.load(f)
+    
+    # Load test data
+    test_file = f"{DATA_DIR}/{cfg.dataset_name}/{cfg.data_version}/test.json"
+    with open(test_file, 'r') as f:
+        all_test_data = json.load(f)  
+    
+    if cfg.dataset_type == "pretrain":
+        # Load training data      
+        train_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for i, item in enumerate(all_train_data) if len(item['prefix']) > 5]
+        test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for item in all_test_data if len(item['prefix']) > 5]    
+    
+    elif cfg.dataset_type == "sft":
+        train_data_transformed = [convert_item_hendrycks_math(item, cfg=cfg) for item in all_train_data]
+        test_data_transformed = [convert_item_hendrycks_math(item, cfg=cfg) for item in all_test_data]        
+        
+
+
+    if cfg.debug:
         train_dataset = Dataset.from_list(train_data_transformed[:1])
+        test_dataset = train_dataset
     else:
         train_dataset = Dataset.from_list(train_data_transformed)
-
-    # Load test data
-    with open(f"{DATA_DIR}/wikipedia_openwebmath/incontextv4_sft_test/chunk_0_elements_0_50000_filtered.json", 'r') as f:
-        all_test_data = json.load(f)
+        test_dataset = Dataset.from_list(test_data_transformed)
     
     if os.environ.get('LOCAL_RANK', '0') == '0':
-        print(len(all_test_data))
+        print("Number of test examples:", len(all_test_data))
+        print("Number of training examples:", len(all_train_data))
 
-    if cfg.use_incontext:
-        test_data_transformed = [convert_item_incontext(item, eos_token=tokenizer.eos_token, cfg=cfg) for item in all_test_data if len(item['prefix']) > 5]
-    else:
-        test_data_transformed = [convert_item(item) for item in all_test_data]
-    test_dataset = Dataset.from_list(test_data_transformed)
-
-    test_ds_privileged = load_from_disk(f"{DATA_DIR}/wikipedia_openwebmath/test/chunk_0")
+    causal_llm = cfg.causal_llm
+    
     output_dir = cfg.output_dir + '/' + (wandb.run.name if os.environ.get('LOCAL_RANK', '0') == '0' else 'tmp')
     if os.environ.get('LOCAL_RANK', '0') == '0':
         if not os.path.exists(output_dir):
@@ -582,22 +616,38 @@ def main(cfg):
     # if os.environ.get('LOCAL_RANK', '0') == '0':
     #     print(f"Time taken to load Hendrycks Math test data: {time.time() - start_time} seconds")
 
-    # Initialize callbacks
-    callback = GenerateSamplesCallback(
-        train_dataset=train_dataset,
-        test_dataset=test_dataset,
-        tokenizer=tokenizer,
-        generate_every_n_steps=cfg.generate_every_n_steps,
-        num_samples=cfg.num_samples,
-        max_new_tokens=cfg.max_new_tokens,
-        cfg=cfg,
-        start_thinking_token=start_thinking_token,
-        end_thinking_token=end_thinking_token,
-        eos_token=eos_token,
-    )
 
+
+    # Initialize callbacks
+    callbacks = []
+    if cfg.dataset_type == "sft":
+        hendrycks_math_callback = HendrycksMathGenerateSamplesCallback(
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            generate_every_n_steps=cfg.generate_every_n_steps,
+            num_samples=cfg.num_samples,
+            max_new_tokens=cfg.max_new_tokens,
+            cfg=cfg,
+        )    
+        callbacks.append(hendrycks_math_callback)
+    
+    if cfg.generate_samples:
+        callback = GenerateSamplesCallback(
+            train_dataset=train_dataset,
+            test_dataset=test_dataset,
+            tokenizer=tokenizer,
+            generate_every_n_steps=cfg.generate_every_n_steps,
+            num_samples=cfg.num_samples,
+            max_new_tokens=cfg.max_new_tokens,
+            cfg=cfg,
+            start_thinking_token=start_thinking_token,
+            end_thinking_token=end_thinking_token,
+            eos_token=eos_token,
+        )
+        callbacks.append(callback)
+    
     if causal_llm:
-        formatting_prompts_func_input = partial(formatting_prompts_func, start_thinking_token=start_thinking_token, end_thinking_token=end_thinking_token, eos_token=eos_token)
+        formatting_prompts_func_input = partial(formatting_prompts_func, start_thinking_token=start_thinking_token, end_thinking_token=end_thinking_token, eos_token=eos_token, cfg=cfg, tokenizer=tokenizer)
     else:
         formatting_prompts_func_input = None
 
@@ -610,9 +660,11 @@ def main(cfg):
         formatting_func=formatting_prompts_func_input,
         peft_config=get_peft_config(cfg),
         args=training_args,
-        callbacks=[callback] if os.environ.get('LOCAL_RANK', '0') == '0' else [],
+        callbacks=callbacks,
     )
     trainer.can_return_loss = True
+    
+    
 
     if os.environ.get('LOCAL_RANK', '0') == '0':
         num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -620,13 +672,8 @@ def main(cfg):
         print("parameter_names without lora", parameter_names)
         print(f"Number of trainable parameters: {num_trainable_params:,}")
 
-    if cfg.load_exp is not None:
-        load_base = "/".join(CKPT_DIR.split('/')[:-1])
-        load_dir = f"{load_base}/saved/{cfg.load_exp}"
-        assert os.path.exists(load_dir), f"Checkpoint directory {load_dir} does not exist"
-        print("Loading from", load_dir)
-    else:
-        load_dir = None
+
+    
     # Train model
     trainer.train(resume_from_checkpoint=load_dir)
 

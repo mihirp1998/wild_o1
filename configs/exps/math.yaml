@@ -1,0 +1,5 @@
+# @package _global_
+
+data_version: v1
+dataset_name: math_hendrycks
+dataset_type: sft

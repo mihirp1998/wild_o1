@@ -1,6 +1,7 @@
 
 
 import pprint
+from typing import Dict, List, Optional
 
 def last_boxed_only(sample):
     """
@@ -13,8 +14,10 @@ def last_boxed_only(sample):
         return None
     return (q, a)
 
-def last_boxed_only_string(string):
+def last_boxed_only_string(string: str) -> Optional[str]:
     idx = string.rfind("\\boxed")
+    if "\\boxed " in string:
+        return "\\boxed " + string.split("\\boxed ")[-1].split("$")[0]
     if idx < 0:
         idx = string.rfind("\\fbox")
         if idx < 0:
@@ -32,13 +35,29 @@ def last_boxed_only_string(string):
                 right_brace_idx = i
                 break
         i += 1
-    
-    if right_brace_idx == None:
+
+    if right_brace_idx is None:
         retval = None
     else:
-        retval = string[idx:right_brace_idx + 1]
-    
+        retval = string[idx : right_brace_idx + 1]
+
     return retval
+
+
+
+
+def remove_boxed(s: str) -> str:
+    if "\\boxed " in s:
+        left = "\\boxed "
+        assert s[: len(left)] == left
+        return s[len(left) :]
+
+    left = "\\boxed{"
+
+    assert s[: len(left)] == left
+    assert s[-1] == "}"
+
+    return s[len(left) : -1]
 
 def only_until_first_boxed_from_tokens(string, tokens):
     idx = string.find("\\boxed")
